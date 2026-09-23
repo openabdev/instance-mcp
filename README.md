@@ -31,9 +31,16 @@ you a shell; this exists for what SSH cannot reach.
 |---|---|---|
 | `sys_info` | host, OS, chip, displays, tailnet IPs, console user, TCC status | call first; tells the model what will work |
 | `exec` | `zsh -f -c <command>` as the desktop user | `cwd`, `env`, `timeout_secs` (≤600), `max_output_bytes` (≤1 MiB/stream). Spawned with `POSIX_SPAWN_SETSID`; timeout → `killpg` → exit 137, `timed_out=true`. `structuredContent` carries exit/stdout/stderr/duration |
-| `screenshot` | ScreenCaptureKit → JPEG/PNG as MCP `image` content | `display`, `scale` (default 0.5), `format`, `quality`. Needs Screen Recording TCC |
+| `screenshot` | ScreenCaptureKit → JPEG/PNG as MCP `image` content | `display`, `scale` (px per point, default 1.0), `region` {x,y,w,h} crop in points, `format`, `quality`. Needs Screen Recording TCC. Read small UI text with `region` + `scale: 2` |
+| `mouse` | CGEvent: `move` `click` `double_click` `right_click` `drag` `scroll` | coordinates in display points = screenshot pixels at scale 1. `modifiers`. Needs Accessibility TCC |
+| `key` | CGEvent: `type` (unicode, layout-independent) / `press` combos (`cmd+shift+4`) | Needs Accessibility TCC |
+| `osascript` | AppleScript / JXA via `/usr/bin/osascript` in the GUI session | `timeout_secs` (default 15). First script against an app raises an Automation consent dialog on the Mac — screenshot, then `mouse` click Allow |
 
-Planned: `mouse`, `key` (CGEvent), `osascript`, and a streaming capture sink for OpenAB Connect.
+The loop the tools are designed for: `screenshot` → decide → `mouse`/`key`/`osascript` → `screenshot` to confirm.
+Verified 2026-09-22 from the laptop: open TextEdit, type a line, read it back, close via the save
+sheet's Delete button located from a screenshot, quit — 0.15–0.8 s per call.
+
+Planned: a streaming capture sink for OpenAB Connect (see requirement doc).
 
 ## Auth
 
@@ -71,9 +78,15 @@ ssh macmini 'cd ~/src/oab-mac-agent && bash scripts/deploy.sh you@example.com'
 `<team-id>` Apple Development cert, installs LaunchAgent `dev.openab.mac-agent` in `gui/501`,
 and runs `tailscale serve --bg --https=8444 http://127.0.0.1:8795`.
 
-Then, once, on the Mac's own screen: System Settings → Privacy & Security → Screen & System
-Audio Recording → enable **oab-mc-agent** → `launchctl kickstart -k gui/501/dev.openab.mac-agent`.
-`sys_info` reports `screen_recording=true` when done.
+Then, once, on the Mac's own screen, System Settings → Privacy & Security:
+- Screen & System Audio Recording → enable **oab-mc-agent**
+- Accessibility → enable **oab-mc-agent**
+
+then `launchctl kickstart -k gui/501/dev.openab.mac-agent`. `sys_info` reports both as `true` when
+done. Grants survive re-signing with the same identity + bundle id (verified across 0.1.0→0.2.0).
+
+Also on the Mac: `sudo pmset -a displaysleep 0`. With display sleep on, an idle Mac returns black
+screenshots and, once the lock engages, drops injected input.
 
 Client:
 
@@ -109,6 +122,16 @@ Measured from the laptop: `sys_info` 0.75 s, `exec` 0.47 s, a 1 s exec timeout r
 - **`tccutil reset ScreenCapture <bundle-id>` does not make the prompt appear.** After the
   first denial the system records it and further capture attempts fail silently; the grant
   has to be toggled in System Settings on the machine's own display.
+- **Display sleep = black screenshots.** macmini shipped with `displaysleep 3`; the first
+  screenshot after a quiet spell was solid black with a cursor. `pmset -a displaysleep 0`.
+- **A stuck `osascript` is usually a consent dialog.** First AppleEvent to an app pops an
+  Automation prompt on the Mac; the call blocks until answered. Over SSH the prompt is attributed
+  to `sshd-keygen-wrapper` — decline those; only the agent bundle should hold Automation grants.
+- **`launchctl bootout` returns before the job is gone**; an immediate `bootstrap` fails and,
+  under `set -e`, took the deploy script with it — leaving no agent running. Poll until
+  `launchctl print` fails before bootstrapping.
+- **Model vision vs capture.** At scale 0.5 a 1080p menu bar is ~12 px tall and the model refuses
+  to read it (correctly). Default is now scale 1.0; for text, crop with `region` at `scale: 2`.
 - `/tmp` is `/private/tmp` — `exec` reports resolved paths.
 - `zsh -f` is deliberate: the user's `.zshenv` sources a RAID-path `.cargo/env` that fails
   under launchd. Callers get a clean shell; set `env` explicitly if they need PATH additions.

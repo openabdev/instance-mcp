@@ -67,7 +67,11 @@ cat >"$PLIST" <<EOF
 EOF
 plutil -lint "$PLIST"
 UID_=$(id -u)
-launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
+if launchctl print "gui/$UID_/$LABEL" >/dev/null 2>&1; then
+  launchctl bootout "gui/$UID_/$LABEL" || true
+  # bootout returns before the job is gone; bootstrap races it and fails with EEXIST.
+  for _ in $(seq 1 40); do launchctl print "gui/$UID_/$LABEL" >/dev/null 2>&1 || break; sleep 0.25; done
+fi
 launchctl bootstrap "gui/$UID_" "$PLIST"
 for _ in $(seq 1 20); do curl -s -m 1 "http://127.0.0.1:$PORT/healthz" >/dev/null && break; sleep 0.25; done
 launchctl print "gui/$UID_/$LABEL" | grep -E 'state|pid ='

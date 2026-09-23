@@ -1,8 +1,9 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import MacAgentCore
 
-let version = "0.1.0"
+let version = "0.2.0"
 
 struct Options {
     var host = "127.0.0.1"
@@ -17,7 +18,7 @@ struct Options {
 
 func usage() -> Never {
     print("""
-    oab-mc-agent \(version) — MCP server exposing this Mac (exec / screenshot / sys_info)
+    oab-mc-agent \(version) — MCP server exposing this Mac (exec / screenshot / mouse / key / osascript / sys_info)
 
     USAGE: oab-mc-agent [--host 127.0.0.1] [--port 8795] [--path /mcp]
                         [--allow-login <email>]... [--token <str> | --token-file <path>]
@@ -85,9 +86,11 @@ let server = MCPServer(
     instructions: """
         This server is a Mac (\(Host.current().localizedName ?? "unknown")) running in its logged-in \
         desktop session. `exec` runs shell commands as the desktop user; `screenshot` returns what is \
-        on screen; call `sys_info` first to learn displays and which permissions are granted.
+        on screen; `mouse` and `key` inject input (coordinates in display points, same as screenshot's \
+        `points`); `osascript` drives scriptable apps. Call `sys_info` first to learn displays and which \
+        permissions are granted. Typical loop: screenshot → decide → mouse/key → screenshot to confirm.
         """,
-    tools: [SysInfoTool(agentVersion: version), ExecTool(), ScreenshotTool()]
+    tools: [SysInfoTool(agentVersion: version), ExecTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()]
 )
 let endpoint = MCPHTTPEndpoint(path: opts.path, server: server, auth: auth, log: log)
 
@@ -101,7 +104,7 @@ do {
 }
 log("oab-mc-agent \(version) starting on http://\(opts.host):\(opts.port)\(opts.path) " +
     "auth=[logins:\(opts.allowLogins.sorted().joined(separator: ",")) token:\(opts.token != nil) insecure-local:\(opts.insecureLocal)] " +
-    "screen_recording=\(CGPreflightScreenCaptureAccess())")
+    "screen_recording=\(CGPreflightScreenCaptureAccess()) accessibility=\(AXIsProcessTrusted())")
 http.start()
 
 signal(SIGPIPE, SIG_IGN)

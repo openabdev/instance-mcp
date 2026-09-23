@@ -1,3 +1,4 @@
+import ApplicationServices
 import XCTest
 @testable import MacAgentCore
 
@@ -326,5 +327,81 @@ final class ExecToolTests: XCTestCase {
         do { _ = try await tool.call(arguments: [:]); XCTFail() }
         catch let e as JSONRPCError { XCTAssertEqual(e.code, JSONRPCError.invalidParams) }
         catch { XCTFail("\(error)") }
+    }
+}
+
+// MARK: - input
+
+final class InputParsingTests: XCTestCase {
+    func testSimpleKey() throws {
+        let c = try Input.parseCombo("return")
+        XCTAssertEqual(c.code, 0x24); XCTAssertEqual(c.flags, [])
+    }
+
+    func testComboCaseInsensitiveWithSpaces() throws {
+        let c = try Input.parseCombo("Cmd + Shift + 4")
+        XCTAssertEqual(c.code, 0x15)
+        XCTAssertTrue(c.flags.contains(.maskCommand)); XCTAssertTrue(c.flags.contains(.maskShift))
+        XCTAssertFalse(c.flags.contains(.maskControl))
+    }
+
+    func testModifierAliases() throws {
+        XCTAssertEqual(try Input.parseCombo("option+left").flags, .maskAlternate)
+        XCTAssertEqual(try Input.parseCombo("control+c").flags, .maskControl)
+        XCTAssertEqual(try Input.parseCombo("meta+v").flags, .maskCommand)
+    }
+
+    func testPlusSpelledOut() throws {
+        XCTAssertEqual(try Input.parseCombo("cmd+plus").code, 0x18)
+    }
+
+    func testUnknownKeyAndModifier() {
+        XCTAssertThrowsError(try Input.parseCombo("cmd+nosuchkey"))
+        XCTAssertThrowsError(try Input.parseCombo("hyper+a"))
+        XCTAssertThrowsError(try Input.parseCombo(""))
+        // Modifier in key position is an error, not a no-op press.
+        XCTAssertThrowsError(try Input.parseCombo("cmd"))
+    }
+
+    func testKeycodeTableCoversAsciiPrintables() {
+        for ch in "abcdefghijklmnopqrstuvwxyz0123456789-=[]\\;',./`" {
+            XCTAssertNotNil(Input.keycodes[String(ch)], "missing keycode for \(ch)")
+        }
+    }
+
+    func testMouseRequiresActionAndCoords() async {
+        // Without Accessibility these throw the TCC ToolError before validation; only
+        // assert on the validation path when trusted (CI over SSH is not).
+        guard AXIsProcessTrusted() else { return }
+        let m = MouseTool()
+        do { _ = try await m.call(arguments: ["action": "click"]); XCTFail() }
+        catch let e as JSONRPCError { XCTAssertEqual(e.code, JSONRPCError.invalidParams) } catch { XCTFail("\(error)") }
+        do { _ = try await m.call(arguments: ["action": "scroll"]); XCTFail() }
+        catch let e as JSONRPCError { XCTAssertEqual(e.code, JSONRPCError.invalidParams) } catch { XCTFail("\(error)") }
+    }
+}
+
+final class OsascriptToolTests: XCTestCase {
+    func testAppleScriptResult() async throws {
+        let r = try await OsascriptTool().call(arguments: ["script": "return 6 * 7"])
+        XCTAssertFalse(r.isError)
+        XCTAssertEqual(r.structured?["result"]?.stringValue, "42")
+    }
+
+    func testJavaScriptResult() async throws {
+        let r = try await OsascriptTool().call(arguments: ["script": "'x'.repeat(3)", "language": "javascript"])
+        XCTAssertEqual(r.structured?["result"]?.stringValue, "xxx")
+    }
+
+    func testSyntaxErrorIsErrorResult() async throws {
+        let r = try await OsascriptTool().call(arguments: ["script": "tell application"])
+        XCTAssertTrue(r.isError)
+        XCTAssertNotEqual(r.structured?["exit_code"]?.intValue, 0)
+    }
+
+    func testTimeout() async throws {
+        let r = try await OsascriptTool().call(arguments: ["script": "delay 30", "timeout_secs": 1])
+        XCTAssertTrue(r.isError)
+        XCTAssertEqual(r.structured?["timed_out"]?.boolValue, true)
     }
 }

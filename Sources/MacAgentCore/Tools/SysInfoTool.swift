@@ -75,6 +75,7 @@ public struct SysInfoTool: Tool {
         lines.append("tailscale: \(tail.isEmpty ? "none" : tail.joined(separator: ", "))")
         lines.append("permissions: screen_recording=\(screenRecording) accessibility=\(accessibility)")
         if !screenRecording { lines.append("→ screenshot will fail until Screen Recording is granted to oab-mc-agent") }
+        if !accessibility { lines.append("→ mouse/key will fail until Accessibility is granted to oab-mc-agent") }
         lines.append("agent \(agentVersion)")
         return ToolResult(content: [.text(lines.joined(separator: "\n"))], structured: structured)
     }
