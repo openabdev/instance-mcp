@@ -1,0 +1,196 @@
+import Foundation
+
+/// Run a shell command in the daemon's (Aqua) session. Equivalent trust to SSH as the
+/// same user, plus GUI/TCC context SSH lacks.
+public struct ExecTool: Tool {
+    public let name = "exec"
+    public let description = """
+        Run a shell command on this Mac with zsh -c, inside the logged-in GUI session \
+        (so `open`, `osascript`, `screencapture` and other GUI-touching commands work). \
+        Returns exit code, stdout and stderr. Output is truncated to max_output_bytes \
+        (default 64 KiB) per stream; a timeout kills the process group and reports timed_out=true.
+        """
+    public let inputSchema: JSONValue = [
+        "type": "object",
+        "properties": [
+            "command": ["type": "string", "description": "Shell command line, run via `zsh -c`."],
+            "cwd": ["type": "string", "description": "Working directory. Default: user's home."],
+            "timeout_secs": ["type": "number", "description": "Kill after this many seconds. Default 60, max 600."],
+            "max_output_bytes": ["type": "integer", "description": "Per-stream cap. Default 65536, max 1048576."],
+            "env": ["type": "object", "additionalProperties": ["type": "string"], "description": "Extra environment variables."],
+        ],
+        "required": ["command"],
+    ]
+
+    public var defaultTimeout: TimeInterval = 60
+    public var maxTimeout: TimeInterval = 600
+
+    public init() {}
+
+    public func call(arguments: JSONValue) async throws -> ToolResult {
+        guard let command = arguments["command"]?.stringValue, !command.isEmpty else {
+            throw JSONRPCError.invalidParams("command is required")
+        }
+        let timeout = min(arguments["timeout_secs"]?.doubleValue ?? defaultTimeout, maxTimeout)
+        let cap = min(arguments["max_output_bytes"]?.intValue ?? 65536, 1 << 20)
+        let cwd = arguments["cwd"]?.stringValue ?? FileManager.default.homeDirectoryForCurrentUser.path
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = env["TERM"] ?? "dumb"
+        if let extra = arguments["env"]?.objectValue {
+            for (k, v) in extra { if let s = v.stringValue { env[k] = s } }
+        }
+
+        let r = try await Self.run(command: command, cwd: cwd, env: env, timeout: timeout, cap: cap)
+
+        var text = ""
+        if !r.stdout.isEmpty { text += r.stdout }
+        if !r.stderr.isEmpty { text += (text.isEmpty ? "" : "\n") + "[stderr]\n" + r.stderr }
+        var trailer = "[exit \(r.exitCode)"
+        if r.timedOut { trailer += ", timed out after \(Int(timeout))s" }
+        if r.stdoutTruncated || r.stderrTruncated { trailer += ", output truncated" }
+        trailer += "]"
+        text += (text.isEmpty ? "" : "\n") + trailer
+
+        let structured: JSONValue = [
+            "exit_code": .number(Double(r.exitCode)),
+            "timed_out": .bool(r.timedOut),
+            "stdout": .string(r.stdout), "stderr": .string(r.stderr),
+            "stdout_truncated": .bool(r.stdoutTruncated), "stderr_truncated": .bool(r.stderrTruncated),
+            "duration_ms": .number(Double(Int(r.duration * 1000))),
+        ]
+        return ToolResult(content: [.text(text)], isError: r.exitCode != 0 || r.timedOut, structured: structured)
+    }
+
+    public struct Outcome: Sendable {
+        public var exitCode: Int32
+        public var timedOut: Bool
+        public var stdout: String
+        public var stderr: String
+        public var stdoutTruncated: Bool
+        public var stderrTruncated: Bool
+        public var duration: TimeInterval
+    }
+
+    /// Spawns `zsh -f -c command` as the leader of a *new session* (POSIX_SPAWN_SETSID), so
+    /// on timeout `killpg(pid)` takes the whole child tree and can never reach the daemon's
+    /// own process group. Foundation's `Process` cannot do this, hence posix_spawn.
+    public static func run(command: String, cwd: String, env: [String: String], timeout: TimeInterval, cap: Int) async throws -> Outcome {
+        let start = Date()
+
+        var outFDs: [Int32] = [0, 0], errFDs: [Int32] = [0, 0]
+        guard pipe(&outFDs) == 0, pipe(&errFDs) == 0 else { throw ToolError("pipe() failed: \(errno)") }
+
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        var sigs = sigset_t(); sigemptyset(&sigs)
+        posix_spawnattr_setsigmask(&attr, &sigs)
+        var flags = Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)
+        flags |= Int16(POSIX_SPAWN_SETSID)
+        posix_spawnattr_setflags(&attr, flags)
+
+        var actions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, outFDs[1], 1)
+        posix_spawn_file_actions_adddup2(&actions, errFDs[1], 2)
+        posix_spawn_file_actions_addchdir_np(&actions, cwd)
+
+        // -f: skip rc files. The user's zshrc sources a RAID-path `.cargo/env` that trips
+        // TCC under launchd; exec callers get a clean, predictable shell instead.
+        let argv: [String] = ["/bin/zsh", "-f", "-c", command]
+        let envp: [String] = env.map { "\($0.key)=\($0.value)" }
+        var pid: pid_t = 0
+        let rc = withCStrings(argv) { argvPtrs in
+            withCStrings(envp) { envPtrs in
+                posix_spawn(&pid, "/bin/zsh", &actions, &attr, argvPtrs, envPtrs)
+            }
+        }
+        close(outFDs[1]); close(errFDs[1])
+        guard rc == 0 else {
+            close(outFDs[0]); close(errFDs[0])
+            throw ToolError("posix_spawn failed: \(String(cString: strerror(rc)))")
+        }
+
+        let collector = OutputCollector(cap: cap)
+        let ioQueue = DispatchQueue(label: "oab-mc-agent.exec.io", attributes: .concurrent)
+        let group = DispatchGroup()
+        for (fd, stream) in [(outFDs[0], 0), (errFDs[0], 1)] {
+            group.enter()
+            ioQueue.async {
+                let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                while true {
+                    let d = h.availableData     // blocks; empty ⇒ EOF
+                    if d.isEmpty { break }
+                    collector.append(d, stream: stream)
+                }
+                group.leave()
+            }
+        }
+
+        let fired = LockedFlag()
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler { if fired.trySet() { killpg(pid, SIGKILL) } }
+        timer.resume()
+
+        let status: Int32 = await withCheckedContinuation { cont in
+            DispatchQueue.global().async {
+                var st: Int32 = 0
+                while waitpid(pid, &st, 0) < 0 && errno == EINTR {}
+                cont.resume(returning: st)
+            }
+        }
+        timer.cancel()
+        // Pipes reach EOF once every writer in the (now dead) session has exited.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            group.notify(queue: .global()) { cont.resume() }
+        }
+
+        let exitCode: Int32
+        if (status & 0x7f) == 0 { exitCode = (status >> 8) & 0xff }        // WIFEXITED → WEXITSTATUS
+        else { exitCode = 128 + (status & 0x7f) }                           // signalled, shell convention
+
+        let (out, outT, err, errT) = collector.snapshot()
+        return Outcome(
+            exitCode: exitCode, timedOut: fired.isSet,
+            stdout: String(decoding: out, as: UTF8.self), stderr: String(decoding: err, as: UTF8.self),
+            stdoutTruncated: outT, stderrTruncated: errT,
+            duration: Date().timeIntervalSince(start))
+    }
+}
+
+/// NULL-terminated `char *[]` for posix_spawn, valid for the duration of `body`.
+func withCStrings<R>(_ strings: [String], _ body: ([UnsafeMutablePointer<CChar>?]) -> R) -> R {
+    var ptrs: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
+    ptrs.append(nil)
+    defer { for p in ptrs { free(p) } }
+    return body(ptrs)
+}
+
+final class OutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bufs = [Data(), Data()]
+    private var truncated = [false, false]
+    private let cap: Int
+    init(cap: Int) { self.cap = cap }
+    func append(_ d: Data, stream: Int) {
+        guard !d.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        let room = cap - bufs[stream].count
+        if room <= 0 { truncated[stream] = true; return }
+        if d.count > room { bufs[stream].append(d.prefix(room)); truncated[stream] = true }
+        else { bufs[stream].append(d) }
+    }
+    func snapshot() -> (Data, Bool, Data, Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (bufs[0], truncated[0], bufs[1], truncated[1])
+    }
+}
+
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock(); private var v = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return v }
+    func trySet() -> Bool { lock.lock(); defer { lock.unlock() }; if v { return false }; v = true; return true }
+}
