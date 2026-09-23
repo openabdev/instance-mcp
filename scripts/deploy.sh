@@ -15,8 +15,11 @@ APP="$BASE/oab-mc-agent.app"
 BIN="$(cd "$(dirname "$0")/.." && pwd)/.build/release/oab-mc-agent"
 TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 VERSION="$("$BIN" --version)"
+DNSNAME="$("$TS" status --self --peers=false --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
 
 [ -x "$BIN" ] || { echo "build first: swift build -c release"; exit 1; }
+NEWEST_SRC=$(find "$(dirname "$0")/../Sources" -name '*.swift' -newer "$BIN" | head -1)
+[ -z "$NEWEST_SRC" ] || { echo "binary older than $NEWEST_SRC — rebuild first"; exit 1; }
 mkdir -p "$BASE" "$HOME/Library/Logs/oab-mac-agent"
 
 echo "--- bundle $APP ($VERSION) ---"
@@ -57,6 +60,8 @@ cat >"$PLIST" <<EOF
     <string>$APP/Contents/MacOS/oab-mc-agent</string>
     <string>--port</string><string>$PORT</string>
     <string>--allow-login</string><string>$LOGIN</string>
+    <string>--menu-bar</string>
+    <string>--public-url</string><string>https://$DNSNAME:$HTTPS_PORT/mcp</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -82,5 +87,5 @@ echo "--- tailscale serve :$HTTPS_PORT → :$PORT ---"
 "$TS" serve status | grep -A1 ":$HTTPS_PORT"
 
 echo
-echo "MCP URL: https://$("$TS" status --self --peers=false --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'):$HTTPS_PORT/mcp"
+echo "MCP URL: https://$DNSNAME:$HTTPS_PORT/mcp"
 echo "Screen Recording: System Settings → Privacy & Security → Screen & System Audio Recording → enable oab-mc-agent, then: launchctl kickstart -k gui/$UID_/$LABEL"

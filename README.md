@@ -94,6 +94,13 @@ Client:
 kiro-cli mcp add --name macmini-agent --url https://macmini.<tailnet>.ts.net:8444/mcp --scope global --timeout 30000
 ```
 
+## Menu bar
+
+With `--menu-bar` (deploy.sh sets it) the agent shows a status item: version, the public MCP URL
+(click to copy), ✓/✗ for Screen Recording and Accessibility (click ✗ to open the pane), session /
+call counters with the last tool call, Open Log, Restart, and Quit (which boots the launchd job
+out so KeepAlive does not bring it back). The icon fills briefly on each tool call.
+
 ## Operate
 
 ```sh

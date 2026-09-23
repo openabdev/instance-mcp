@@ -1,9 +1,10 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
 import MacAgentCore
 
-let version = "0.2.0"
+let version = "0.3.0"
 
 struct Options {
     var host = "127.0.0.1"
@@ -14,6 +15,8 @@ struct Options {
     var tokenFile: String? = nil
     var insecureLocal = false
     var quiet = false
+    var menuBar = false
+    var publicURL: String? = nil
 }
 
 func usage() -> Never {
@@ -22,7 +25,7 @@ func usage() -> Never {
 
     USAGE: oab-mc-agent [--host 127.0.0.1] [--port 8795] [--path /mcp]
                         [--allow-login <email>]... [--token <str> | --token-file <path>]
-                        [--insecure-local] [--quiet]
+                        [--insecure-local] [--quiet] [--menu-bar] [--public-url <https://…/mcp>]
 
     Auth (at least one required unless --insecure-local):
       --allow-login   Tailscale login (from `tailscale serve`'s Tailscale-User-Login header). Repeatable.
@@ -30,6 +33,9 @@ func usage() -> Never {
       --token-file    Read the token from a file (trailing newline stripped).
       --insecure-local  Allow unauthenticated requests that arrive on loopback *without*
                         Tailscale headers. For local debugging only.
+
+      --menu-bar      Show a status item in the menu bar (permissions, activity, restart/quit).
+      --public-url    The URL clients use (shown/copied from the menu); defaults to the local one.
 
     Run it as a LaunchAgent in the logged-in user's GUI session (gui/<uid>), not a
     LaunchDaemon — screenshot and input tools need the Aqua session and TCC grants.
@@ -56,6 +62,8 @@ while !args.isEmpty {
     case "--token-file": opts.tokenFile = next(a)
     case "--insecure-local": opts.insecureLocal = true
     case "--quiet": opts.quiet = true
+    case "--menu-bar": opts.menuBar = true
+    case "--public-url": opts.publicURL = next(a)
     case "--version": print(version); exit(0)
     case "-h", "--help": usage()
     default: fputs("unknown flag \(a)\n", stderr); usage()
@@ -75,9 +83,14 @@ let auth = AuthPolicy(allowedLogins: opts.allowLogins, bearerToken: opts.token, 
 do { try auth.validate() } catch { fputs("\(error)\n", stderr); exit(64) }
 
 let fmt = ISO8601DateFormatter()
+nonisolated(unsafe) var statusItem: StatusItemController? = nil
 let log: @Sendable (String) -> Void = { msg in
-    if opts.quiet { return }
-    FileHandle.standardError.write(Data("\(fmt.string(from: Date())) \(msg)\n".utf8))
+    if !opts.quiet {
+        FileHandle.standardError.write(Data("\(fmt.string(from: Date())) \(msg)\n".utf8))
+    }
+    if statusItem != nil {
+        DispatchQueue.main.async { MainActor.assumeIsolated { statusItem?.observe(msg) } }
+    }
 }
 
 let server = MCPServer(
@@ -113,4 +126,15 @@ signal(SIGTERM, SIG_IGN)
 stop.setEventHandler { log("SIGTERM, exiting"); exit(0) }
 stop.resume()
 
-RunLoop.main.run()
+if opts.menuBar {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)     // no Dock icon, no main menu; status item only
+    let logPath = NSHomeDirectory() + "/Library/Logs/oab-mac-agent/agent.log"
+    let publicURL = opts.publicURL ?? "http://\(opts.host):\(opts.port)\(opts.path)"
+    statusItem = MainActor.assumeIsolated {
+        StatusItemController(version: version, url: publicURL, logPath: logPath)
+    }
+    app.run()
+} else {
+    RunLoop.main.run()
+}
