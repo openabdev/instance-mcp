@@ -5,17 +5,48 @@ a thin daemon that lives in a Mac's logged-in desktop session and exposes the ma
 coding CLI or agent elsewhere on the tailnet as **MCP servers**. Nothing here is smart; all
 the intelligence stays in the caller.
 
+```mermaid
+flowchart LR
+    subgraph callers["Callers — the brain (anywhere on the tailnet)"]
+        cli["Coding CLI / agent<br/>kiro-cli · claude · openab<br/><i>mcp.json: macmini-mcp, macmini-browser</i>"]
+        connect["OpenAB Connect<br/>(Mac app, Screens pane)"]
+    end
+
+    subgraph mac["The instance — a Mac with someone logged in"]
+        subgraph ts["tailscale serve (TLS + identity)"]
+            s8444[":8444 → 127.0.0.1:8795<br/>injects Tailscale-User-Login"]
+            s8443[":8443 → 127.0.0.1:8794"]
+        end
+        subgraph gui["Aqua session · LaunchAgents in gui/501"]
+            mcp["<b>oab-instance-mcp</b> (Swift)<br/>auth = allow-login <b>AND</b> bearer token<br/>sys_info · exec · exec_start/poll/list/cancel<br/>screenshot · mouse · key · osascript"]
+            pw["@playwright/mcp<br/>headed Chromium, persistent profile"]
+        end
+        subgraph hands["What the daemon touches — nothing a logged-in user could not"]
+            shell["Shell<br/>zsh as the desktop user<br/>Xcode · xcodebuild · simulators · git"]
+            screen["Display<br/>ScreenCaptureKit"]
+            input["Input<br/>CGEvent mouse / keyboard"]
+            apps["Apps<br/>osascript / JXA"]
+        end
+        tcc{{"TCC grants, once, on the Mac's own screen<br/>Screen Recording · Accessibility · Automation<br/>bound to bundle id dev.openab.instance-mcp"}}
+    end
+
+    cli -- "HTTPS · MCP Streamable HTTP" --> s8444
+    connect -- "screenshot loop" --> s8444
+    cli -- "HTTPS · MCP" --> s8443
+    s8444 --> mcp
+    s8443 --> pw
+    mcp --> hands
+    tcc -. "gates screen / input / apps" .-> hands
 ```
-laptop / sandbox (tailnet)                 macmini (tailnet, Aqua session, LaunchAgents in gui/501)
-┌───────────────────────┐   HTTPS (MCP)    ┌───────────────────────────────────────────────────┐
-│ kiro-cli / claude …   │ ───────────────► │ tailscale serve :8444 → 127.0.0.1:8795            │
-│  mcp.json:            │                  │   oab-instance-mcp   (Swift)  exec / screenshot / sys_info │
-│   macmini-mcp   → https://macmini.<tn>.ts.net:8444/mcp                                       │
-│   macmini-browser → https://macmini.<tn>.ts.net:8443/mcp                                       │
-│                       │ ───────────────► │ tailscale serve :8443 → 127.0.0.1:8794            │
-└───────────────────────┘                  │   @playwright/mcp (headed Chromium, persistent profile) │
-                                           └───────────────────────────────────────────────────┘
-```
+
+Read it left to right: the model and its reasoning live in the caller; the Mac only receives
+tool calls, and the daemon can do nothing a logged-in user sitting at that Mac could not do.
+Everything on the right is one machine — no cloud hop, no control plane; `tailscale serve`
+terminates TLS on the box and stamps each request with the caller's Tailscale identity, which
+the daemon checks together with a bearer token. The tools that touch the screen or inject input
+are gated by macOS TCC, granted once on the Mac's own screen to the stable bundle id. The loop
+the tools are built for: `screenshot` → decide → `mouse` / `key` / `osascript` / `exec` →
+`screenshot` to confirm.
 
 Two servers, one pattern: bind loopback, let `tailscale serve` do TLS and identity, run as a
 LaunchAgent in the GUI session so TCC-gated things (screen, later input) work. SSH already gives
