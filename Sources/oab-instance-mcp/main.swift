@@ -2,9 +2,9 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import MacAgentCore
+import InstanceMCPCore
 
-let version = "0.3.1"
+let version = "0.4.0"
 
 struct Options {
     var host = "127.0.0.1"
@@ -21,9 +21,9 @@ struct Options {
 
 func usage() -> Never {
     print("""
-    oab-mc-agent \(version) — MCP server exposing this Mac (exec / screenshot / mouse / key / osascript / sys_info)
+    oab-instance-mcp \(version) — MCP server exposing this Mac (exec / screenshot / mouse / key / osascript / sys_info)
 
-    USAGE: oab-mc-agent [--host 127.0.0.1] [--port 8795] [--path /mcp]
+    USAGE: oab-instance-mcp [--host 127.0.0.1] [--port 8795] [--path /mcp]
                         [--allow-login <email>]... [--token <str> | --token-file <path>]
                         [--insecure-local] [--quiet] [--menu-bar] [--public-url <https://…/mcp>]
 
@@ -94,7 +94,7 @@ let log: @Sendable (String) -> Void = { msg in
 }
 
 let server = MCPServer(
-    name: "oab-mc-agent",
+    name: "oab-instance-mcp",
     version: version,
     instructions: """
         You are operating a real Mac (\(Host.current().localizedName ?? "unknown")) through its logged-in \
@@ -106,10 +106,11 @@ let server = MCPServer(
         (region.x + px/2, region.y + py/2). Prefer `osascript` over pixel-hunting for scriptable apps \
         (activate, quit, window titles, Safari URLs). If `osascript` times out, a permission dialog is \
         probably showing: screenshot it and click Allow. `exec` is a plain `zsh -f` shell as the desktop user \
-        (add `/opt/homebrew/bin` to PATH via `env` if needed) and is the right tool for files and commands. \
+        (add `/opt/homebrew/bin` to PATH via `env` if needed) and is the right tool for files and commands; \
+        for long jobs (builds) that outlive one request use `exec_start` then `exec_poll`/`exec_cancel`. \
         Call `sys_info` when unsure which permissions or displays exist.
         """,
-    tools: [SysInfoTool(agentVersion: version), ExecTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()]
+    tools: [SysInfoTool(agentVersion: version), ExecTool(), ExecStartTool(), ExecPollTool(), ExecListTool(), ExecCancelTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()]
 )
 let endpoint = MCPHTTPEndpoint(path: opts.path, server: server, auth: auth, log: log)
 
@@ -121,7 +122,7 @@ do {
 } catch {
     fputs("failed to start listener: \(error)\n", stderr); exit(2)
 }
-log("oab-mc-agent \(version) starting on http://\(opts.host):\(opts.port)\(opts.path) " +
+log("oab-instance-mcp \(version) starting on http://\(opts.host):\(opts.port)\(opts.path) " +
     "auth=[logins:\(opts.allowLogins.sorted().joined(separator: ",")) token:\(opts.token != nil) insecure-local:\(opts.insecureLocal)] " +
     "screen_recording=\(CGPreflightScreenCaptureAccess()) accessibility=\(AXIsProcessTrusted())")
 http.start()
@@ -135,10 +136,10 @@ stop.resume()
 if opts.menuBar {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)     // no Dock icon, no main menu; status item only
-    let logPath = NSHomeDirectory() + "/Library/Logs/oab-mac-agent/agent.log"
+    let logPath = NSHomeDirectory() + "/Library/Logs/oab-instance-mcp/agent.log"
     let publicURL = opts.publicURL ?? "http://\(opts.host):\(opts.port)\(opts.path)"
     statusItem = MainActor.assumeIsolated {
-        StatusItemController(version: version, url: publicURL, logPath: logPath)
+        StatusItemController(version: version, url: publicURL, logPath: logPath, token: opts.token)
     }
     app.run()
 } else {

@@ -11,8 +11,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let version: String
     private let url: String
-    private let launchdLabel = "dev.openab.mac-agent"
+    private let launchdLabel = "dev.openab.instance-mcp"
     private let logPath: String
+    private let token: String?
 
     private var sessions = 0
     private var calls = 0
@@ -20,15 +21,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var lastCall: (tool: String, who: String, at: Date)?
     private var flashWork: DispatchWorkItem?
 
-    init(version: String, url: String, logPath: String) {
+    init(version: String, url: String, logPath: String, token: String? = nil) {
         self.version = version
         self.url = url
         self.logPath = logPath
+        self.token = token
         self.item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         item.button?.image = Self.icon(active: false)
         item.button?.image?.isTemplate = true
-        item.button?.toolTip = "oab-mc-agent \(version)"
+        item.button?.toolTip = "oab-instance-mcp \(version)"
         menu.delegate = self
         item.menu = menu
     }
@@ -36,7 +38,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private static func icon(active: Bool) -> NSImage? {
         let name = active ? "desktopcomputer.and.arrow.down.fill" : "desktopcomputer.and.arrow.down"
         let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        return NSImage(systemSymbolName: name, accessibilityDescription: "oab-mc-agent")?.withSymbolConfiguration(cfg)
+        return NSImage(systemSymbolName: name, accessibilityDescription: "oab-instance-mcp")?.withSymbolConfiguration(cfg)
     }
 
     /// Fed every server log line; cheap string matching keeps the coupling to one closure.
@@ -71,8 +73,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let screen = CGPreflightScreenCaptureAccess()
         let ax = AXIsProcessTrusted()
 
-        menu.addItem(label("oab-mc-agent \(version)"))
+        menu.addItem(label("oab-instance-mcp \(version)"))
         menu.addItem(label(url, action: #selector(copyURL), tip: "Click to copy"))
+        if let token, !token.isEmpty {
+            menu.addItem(label("Token: \(Self.mask(token))", action: #selector(copyToken), tip: "Click to copy the bearer token"))
+        }
         menu.addItem(.separator())
 
         menu.addItem(label("\(screen ? "✓" : "✗") Screen Recording", action: screen ? nil : #selector(openScreenPane)))
@@ -104,6 +109,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func copyURL() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
+    }
+    @objc private func copyToken() {
+        guard let token else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(token, forType: .string)
+    }
+    /// Show only the ends so the menu confirms which token is loaded without exposing it.
+    private static func mask(_ t: String) -> String {
+        guard t.count > 12 else { return String(repeating: "•", count: t.count) }
+        return t.prefix(6) + "…" + t.suffix(4)
     }
     @objc private func openScreenPane() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)

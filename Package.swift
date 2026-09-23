@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "oab-mc-agent",
+    name: "oab-instance-mcp",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "oab-mc-agent", targets: ["oab-mc-agent"]),
-        .library(name: "MacAgentCore", targets: ["MacAgentCore"]),
+        .executable(name: "oab-instance-mcp", targets: ["oab-instance-mcp"]),
+        .library(name: "InstanceMCPCore", targets: ["InstanceMCPCore"]),
     ],
     targets: [
         // Everything testable: JSON-RPC, MCP dispatch, HTTP/1.1 parsing, auth, tools.
         .target(
-            name: "MacAgentCore",
-            path: "Sources/MacAgentCore",
+            name: "InstanceMCPCore",
+            path: "Sources/InstanceMCPCore",
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("CoreGraphics"),
@@ -21,14 +21,14 @@ let package = Package(
         ),
         // Thin CLI: flag parsing + wiring. No logic worth testing lives here.
         .executableTarget(
-            name: "oab-mc-agent",
-            dependencies: ["MacAgentCore"],
-            path: "Sources/oab-mc-agent"
+            name: "oab-instance-mcp",
+            dependencies: ["InstanceMCPCore"],
+            path: "Sources/oab-instance-mcp"
         ),
         .testTarget(
-            name: "MacAgentCoreTests",
-            dependencies: ["MacAgentCore"],
-            path: "Tests/MacAgentCoreTests"
+            name: "InstanceMCPCoreTests",
+            dependencies: ["InstanceMCPCore"],
+            path: "Tests/InstanceMCPCoreTests"
         ),
     ]
 )

@@ -50,7 +50,7 @@ public struct SysInfoTool: Tool {
         let tail = tailnetAddresses()
 
         let structured: JSONValue = [
-            "agent": ["name": "oab-mc-agent", "version": .string(agentVersion), "pid": .number(Double(pi.processIdentifier))],
+            "agent": ["name": "oab-instance-mcp", "version": .string(agentVersion), "pid": .number(Double(pi.processIdentifier))],
             "host": .string(host),
             "os": .string("macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"),
             "hardware": .object(hw),
@@ -74,8 +74,8 @@ public struct SysInfoTool: Tool {
         }.joined(separator: ", "))
         lines.append("tailscale: \(tail.isEmpty ? "none" : tail.joined(separator: ", "))")
         lines.append("permissions: screen_recording=\(screenRecording) accessibility=\(accessibility)")
-        if !screenRecording { lines.append("→ screenshot will fail until Screen Recording is granted to oab-mc-agent") }
-        if !accessibility { lines.append("→ mouse/key will fail until Accessibility is granted to oab-mc-agent") }
+        if !screenRecording { lines.append("→ screenshot will fail until Screen Recording is granted to oab-instance-mcp") }
+        if !accessibility { lines.append("→ mouse/key will fail until Accessibility is granted to oab-instance-mcp") }
         lines.append("agent \(agentVersion)")
         return ToolResult(content: [.text(lines.joined(separator: "\n"))], structured: structured)
     }

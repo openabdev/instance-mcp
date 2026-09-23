@@ -90,7 +90,7 @@ public actor MCPHTTPEndpoint {
 public final class LoopbackHTTPServer: @unchecked Sendable {
     private let listener: NWListener
     private let endpoint: MCPHTTPEndpoint
-    private let queue = DispatchQueue(label: "oab-mc-agent.http", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "oab-instance-mcp.http", qos: .userInitiated)
     private let log: @Sendable (String) -> Void
 
     public init(host: String, port: UInt16, endpoint: MCPHTTPEndpoint, log: @escaping @Sendable (String) -> Void) throws {

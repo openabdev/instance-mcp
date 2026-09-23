@@ -1,4 +1,4 @@
-# oab-mac-agent
+# oab-instance-mcp
 
 The "hands and feet" half of [openabdev/openab#1544](https://github.com/openabdev/openab/issues/1544):
 a thin daemon that lives in a Mac's logged-in desktop session and exposes the machine to a
@@ -9,8 +9,8 @@ the intelligence stays in the caller.
 laptop / sandbox (tailnet)                 macmini (tailnet, Aqua session, LaunchAgents in gui/501)
 ┌───────────────────────┐   HTTPS (MCP)    ┌───────────────────────────────────────────────────┐
 │ kiro-cli / claude …   │ ───────────────► │ tailscale serve :8444 → 127.0.0.1:8795            │
-│  mcp.json:            │                  │   oab-mc-agent   (Swift)  exec / screenshot / sys_info │
-│   macmini-agent   → https://macmini.<tn>.ts.net:8444/mcp                                       │
+│  mcp.json:            │                  │   oab-instance-mcp   (Swift)  exec / screenshot / sys_info │
+│   macmini-mcp   → https://macmini.<tn>.ts.net:8444/mcp                                       │
 │   macmini-browser → https://macmini.<tn>.ts.net:8443/mcp                                       │
 │                       │ ───────────────► │ tailscale serve :8443 → 127.0.0.1:8794            │
 └───────────────────────┘                  │   @playwright/mcp (headed Chromium, persistent profile) │
@@ -21,7 +21,7 @@ Two servers, one pattern: bind loopback, let `tailscale serve` do TLS and identi
 LaunchAgent in the GUI session so TCC-gated things (screen, later input) work. SSH already gives
 you a shell; this exists for what SSH cannot reach.
 
-- `oab-mc-agent` — this package. Swift, zero dependencies (Network.framework + ScreenCaptureKit).
+- `oab-instance-mcp` — this package. Swift, zero dependencies (Network.framework + ScreenCaptureKit).
 - Browser — `@playwright/mcp`, not ours. See [`poc/pw-mcp/README.md`](poc/pw-mcp/README.md).
 - Design notes: [`docs/requirements/connect-closed-loop.md`](docs/requirements/connect-closed-loop.md).
 
@@ -30,7 +30,11 @@ you a shell; this exists for what SSH cannot reach.
 | tool | what | notes |
 |---|---|---|
 | `sys_info` | host, OS, chip, displays, tailnet IPs, console user, TCC status | call first; tells the model what will work |
-| `exec` | `zsh -f -c <command>` as the desktop user | `cwd`, `env`, `timeout_secs` (≤600), `max_output_bytes` (≤1 MiB/stream). Spawned with `POSIX_SPAWN_SETSID`; timeout → `killpg` → exit 137, `timed_out=true`. `structuredContent` carries exit/stdout/stderr/duration |
+| `exec` | `zsh -f -c <command>` as the desktop user | `cwd` (a leading `~` is expanded and validated — a missing dir or unreadable external volume returns a clear error, not a hang), `env`, `timeout_secs` (≤600), `max_output_bytes` (≤1 MiB/stream). Spawned with `POSIX_SPAWN_SETSID`; timeout → `killpg` → exit 137, `timed_out=true`. `structuredContent` carries exit/stdout/stderr/duration. Use for commands that finish in seconds |
+| `exec_start` | start a background job, return a `job_id` immediately | for work that outlives one request (release builds). Same shell/session/TCC as `exec`; `cwd`, `env`, `timeout_secs` (0 = no timeout, stop via `exec_cancel`). stdout/stderr are tee'd to `~/Library/Logs/oab-instance-mcp/jobs/<job_id>.out`/`.err` (never truncated; survive after the job is forgotten; `tail -f`-able) |
+| `exec_poll` | fetch a job's state + incremental output | `job_id`, optional `stdout_since`/`stderr_since` byte offsets (from the prior poll) for only-new output; reads from the log files by seek. Terminal `state` (`exited`/`killed`) carries `exit_code`; `out_path`/`err_path` point at the files |
+| `exec_list` | all running jobs + the 10 most recently finished | recover a forgotten `job_id` or see what is running; each entry has state, pid, exit_code, command, cwd, timestamps, stdout/stderr byte sizes |
+| `exec_cancel` | stop a running job (or drop a finished one) | `job_id`, `signal` `KILL` (default) / `TERM` — signals the whole process group; poll once more for final output. Finished jobs are dropped from the registry (log files stay on disk) |
 | `screenshot` | ScreenCaptureKit → JPEG/PNG as MCP `image` content | `display`, `scale` (px per point, default 1.0), `region` {x,y,w,h} crop in points, `format`, `quality`. Needs Screen Recording TCC. Read small UI text with `region` + `scale: 2` |
 | `mouse` | CGEvent: `move` `click` `double_click` `right_click` `drag` `scroll` | coordinates in display points = screenshot pixels at scale 1. `modifiers`. Needs Accessibility TCC |
 | `key` | CGEvent: `type` (unicode, layout-independent) / `press` combos (`cmd+shift+4`) | Needs Accessibility TCC |
@@ -45,11 +49,18 @@ Planned: a streaming capture sink for OpenAB Connect (see requirement doc).
 ## Auth
 
 Evaluated per request in `AuthPolicy`; the server refuses to start with nothing configured.
+Configured checks are **AND**-combined: a request must pass every check that is set.
 
 - `--allow-login <email>` — matches `Tailscale-User-Login`, which `tailscale serve` **injects and
   overwrites** (verified: a client-supplied header is replaced). This is the primary control.
 - `--token <s>` / `--token-file <p>` — additionally require `Authorization: Bearer`, constant-time
-  compared. Use when a non-Tailscale-identity caller (a sandbox pod) needs in.
+  compared. **`deploy.sh` now generates one at `~/.config/oab-instance-mcp/token` (mode 600) and passes
+  `--token-file`**, so the deployed agent requires *both* an allow-listed Tailscale login *and* the
+  bearer token. This is defence-in-depth: a leaked tailnet auth key that enrols a node as
+  `you@example.com` passes the login check but still gets `401` without the token (verified
+  2026-09-23: no token → 401, correct token → 200, wrong token → 401). The token is stable across
+  re-deploys; rotate by deleting the file and re-deploying. The menu bar shows a masked form and
+  copies the full token (see below); it is never written to `agent.log`.
 - `--insecure-local` — allow bare loopback requests with no Tailscale headers. Debugging only.
 - `/healthz` is unauthenticated and says only `ok`.
 
@@ -59,9 +70,9 @@ sandboxed OAB bot gets this endpoint it needs a tool allowlist and its own token
 ## Build & test (on macmini; the laptop never compiles Swift)
 
 ```sh
-rsync -a --delete --exclude .build --exclude .git ./ macmini:~/src/oab-mac-agent/
-ssh macmini 'cd ~/src/oab-mac-agent && swift build -c release && swift test'
-ssh macmini 'cd ~/src/oab-mac-agent && bash scripts/smoke.sh'   # loopback, every step time-bounded
+rsync -a --delete --exclude .build --exclude .git ./ macmini:~/src/oab-instance-mcp/
+ssh macmini 'cd ~/src/oab-instance-mcp && swift build -c release && swift test'
+ssh macmini 'cd ~/src/oab-instance-mcp && bash scripts/smoke.sh'   # loopback, every step time-bounded
 ```
 
 `~/src` is on the internal disk on purpose: `~/build` is a RAID symlink and LaunchAgents cannot
@@ -70,45 +81,51 @@ read the RAID (TCC on external volumes).
 ## Deploy (run on the target)
 
 ```sh
-ssh macmini 'cd ~/src/oab-mac-agent && bash scripts/deploy.sh you@example.com'
+ssh macmini 'cd ~/src/oab-instance-mcp && bash scripts/deploy.sh you@example.com'
 ```
 
-`deploy.sh` wraps the binary in `~/.local/oab-mac-agent/oab-mc-agent.app` (bundle id
-`dev.openab.mac-agent`) so TCC grants bind to a stable identity, signs it with the
-`<team-id>` Apple Development cert, installs LaunchAgent `dev.openab.mac-agent` in `gui/501`,
+`deploy.sh` wraps the binary in `~/.local/oab-instance-mcp/oab-instance-mcp.app` (bundle id
+`dev.openab.instance-mcp`) so TCC grants bind to a stable identity, signs it with the
+`<team-id>` Apple Development cert, installs LaunchAgent `dev.openab.instance-mcp` in `gui/501`,
 and runs `tailscale serve --bg --https=8444 http://127.0.0.1:8795`.
 
 Then, once, on the Mac's own screen, System Settings → Privacy & Security:
-- Screen & System Audio Recording → enable **oab-mc-agent**
-- Accessibility → enable **oab-mc-agent**
+- Screen & System Audio Recording → enable **oab-instance-mcp**
+- Accessibility → enable **oab-instance-mcp**
 
-then `launchctl kickstart -k gui/501/dev.openab.mac-agent`. `sys_info` reports both as `true` when
+then `launchctl kickstart -k gui/501/dev.openab.instance-mcp`. `sys_info` reports both as `true` when
 done. Grants survive re-signing with the same identity + bundle id (verified across 0.1.0→0.2.0).
 
 Also on the Mac: `sudo pmset -a displaysleep 0`. With display sleep on, an idle Mac returns black
 screenshots and, once the lock engages, drops injected input.
 
-Client:
+Client (the deployed agent requires the bearer token — copy it from the menu bar or the
+`deploy.sh` summary and pass it as a header):
 
 ```sh
-kiro-cli mcp add --name macmini-agent --url https://macmini.<tailnet>.ts.net:8444/mcp --scope global --timeout 30000
+kiro-cli mcp add --name macmini-mcp --url https://macmini.<tailnet>.ts.net:8444/mcp \
+  --header "Authorization: Bearer $(ssh macmini cat ~/.config/oab-instance-mcp/token)" \
+  --scope global --timeout 30000
 ```
 
 ## Menu bar
 
 With `--menu-bar` (deploy.sh sets it) the agent shows a status item: version, the public MCP URL
-(click to copy), ✓/✗ for Screen Recording and Accessibility (click ✗ to open the pane), session /
-call counters with the last tool call, Open Log, Restart, and Quit (which boots the launchd job
-out so KeepAlive does not bring it back). The icon fills briefly on each tool call.
+(click to copy), a masked bearer token line (click to copy the full token), ✓/✗ for Screen
+Recording and Accessibility (click ✗ to open the pane), session / call counters with the last tool
+call, Open Log, Restart, and Quit (which boots the launchd job out so KeepAlive does not bring it
+back). The icon fills briefly on each tool call.
 
 ## Operate
 
 ```sh
-ssh macmini 'launchctl print gui/501/dev.openab.mac-agent | grep -E "state|pid"'
-ssh macmini 'tail -20 ~/Library/Logs/oab-mac-agent/agent.log'      # one line per session open / tools/call / deny
-ssh macmini 'launchctl kickstart -k gui/501/dev.openab.mac-agent'  # restart
+ssh macmini 'launchctl print gui/501/dev.openab.instance-mcp | grep -E "state|pid"'
+ssh macmini 'tail -20 ~/Library/Logs/oab-instance-mcp/agent.log'      # one line per session open / tools/call / deny
+ssh macmini 'launchctl kickstart -k gui/501/dev.openab.instance-mcp'  # restart
 ssh macmini '/Applications/Tailscale.app/Contents/MacOS/Tailscale serve status'
 curl -s https://macmini.<tailnet>.ts.net:8444/healthz
+ssh macmini 'ls -lt ~/Library/Logs/oab-instance-mcp/jobs/'             # exec_start job logs (<id>.out/.err), GC'd after 7 days
+ssh macmini 'tail -f ~/Library/Logs/oab-instance-mcp/jobs/<job_id>.out'  # follow a background build live
 ```
 
 Measured from the laptop: `sys_info` 0.75 s, `exec` 0.47 s, a 1 s exec timeout returns in 1.6 s.
@@ -142,3 +159,11 @@ Measured from the laptop: `sys_info` 0.75 s, `exec` 0.47 s, a 1 s exec timeout r
 - `/tmp` is `/private/tmp` — `exec` reports resolved paths.
 - `zsh -f` is deliberate: the user's `.zshenv` sources a RAID-path `.cargo/env` that fails
   under launchd. Callers get a clean shell; set `env` explicitly if they need PATH additions.
+- **A LaunchAgent cannot read external volumes without Full Disk Access.** A `cwd` on
+  `/Volumes/…` (e.g. a RAID where builds live) does not fail with EPERM — the syscall
+  *blocks*, so an un-guarded `exec` would hang to its timeout. Two fixes: `ExecCwd` time-boxes
+  a readability probe and returns a clear "grant Full Disk Access to dev.openab.instance-mcp"
+  error instead of hanging; and granting FDA to the bundle in System Settings → Privacy &
+  Security → Full Disk Access makes the volume readable (verified 2026-09-23: same `ls
+  /Volumes/…` went from a 15 s timeout to 39 ms). The grant sticks across re-signing like the
+  Screen Recording / Accessibility ones. `exec_start` builds on the RAID work once FDA is granted.

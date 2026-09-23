@@ -43,7 +43,7 @@ public struct ScreenshotTool: Tool {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         } catch {
             throw ToolError("ScreenCaptureKit unavailable: \(error.localizedDescription). " +
-                            "Grant Screen Recording to oab-mc-agent in System Settings → Privacy & Security, then restart the agent.")
+                            "Grant Screen Recording to oab-instance-mcp in System Settings → Privacy & Security, then restart the agent.")
         }
         let displays = content.displays.sorted { $0.displayID < $1.displayID }
         // Put the main display first so index 0 is predictable.

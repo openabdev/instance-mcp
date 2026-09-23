@@ -12,7 +12,7 @@ Using OpenAB Connect (`the OpenAB Connect repo`, the native macOS/iOS client for
    inside Connect (and later OpenAB Remote on iPhone).
 2. **Operate** — the agent running in Connect's PTY session (the coding CLI inside the
    `openab-pty` sandbox) can *drive that same Mac mini over the tailnet*: run commands,
-   control the browser, click/type, using the MCP endpoints `oab-mac-agent` exposes.
+   control the browser, click/type, using the MCP endpoints `oab-instance-mcp` exposes.
 
 Together: **the agent controls the Mac, I watch it happen, from one app**. That is the closed
 loop — Connect is where the human both talks to the agent and sees the consequences.

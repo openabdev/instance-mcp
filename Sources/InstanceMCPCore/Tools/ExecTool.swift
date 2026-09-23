@@ -33,7 +33,12 @@ public struct ExecTool: Tool {
         }
         let timeout = min(arguments["timeout_secs"]?.doubleValue ?? defaultTimeout, maxTimeout)
         let cap = min(arguments["max_output_bytes"]?.intValue ?? 65536, 1 << 20)
-        let cwd = arguments["cwd"]?.stringValue ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let rawCwd = arguments["cwd"]?.stringValue ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let cwd: String
+        switch ExecCwd.resolve(rawCwd) {
+        case .ok(let p): cwd = p
+        case .failure(let why): return .error(why)
+        }
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = env["TERM"] ?? "dumb"
         if let extra = arguments["env"]?.objectValue {
@@ -73,50 +78,18 @@ public struct ExecTool: Tool {
 
     /// Spawns `zsh -f -c command` as the leader of a *new session* (POSIX_SPAWN_SETSID), so
     /// on timeout `killpg(pid)` takes the whole child tree and can never reach the daemon's
-    /// own process group. Foundation's `Process` cannot do this, hence posix_spawn.
+    /// own process group. Foundation's `Process` cannot do this, hence posix_spawn (see
+    /// `ExecSpawn.spawn`). Callers pass an already-resolved `cwd` (see `ExecCwd`).
     public static func run(command: String, cwd: String, env: [String: String], timeout: TimeInterval, cap: Int) async throws -> Outcome {
         let start = Date()
 
-        var outFDs: [Int32] = [0, 0], errFDs: [Int32] = [0, 0]
-        guard pipe(&outFDs) == 0, pipe(&errFDs) == 0 else { throw ToolError("pipe() failed: \(errno)") }
-
-        var attr: posix_spawnattr_t? = nil
-        posix_spawnattr_init(&attr)
-        defer { posix_spawnattr_destroy(&attr) }
-        var sigs = sigset_t(); sigemptyset(&sigs)
-        posix_spawnattr_setsigmask(&attr, &sigs)
-        var flags = Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)
-        flags |= Int16(POSIX_SPAWN_SETSID)
-        posix_spawnattr_setflags(&attr, flags)
-
-        var actions: posix_spawn_file_actions_t? = nil
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_adddup2(&actions, outFDs[1], 1)
-        posix_spawn_file_actions_adddup2(&actions, errFDs[1], 2)
-        posix_spawn_file_actions_addchdir_np(&actions, cwd)
-
-        // -f: skip rc files. The user's zshrc sources a RAID-path `.cargo/env` that trips
-        // TCC under launchd; exec callers get a clean, predictable shell instead.
-        let argv: [String] = ["/bin/zsh", "-f", "-c", command]
-        let envp: [String] = env.map { "\($0.key)=\($0.value)" }
-        var pid: pid_t = 0
-        let rc = withCStrings(argv) { argvPtrs in
-            withCStrings(envp) { envPtrs in
-                posix_spawn(&pid, "/bin/zsh", &actions, &attr, argvPtrs, envPtrs)
-            }
-        }
-        close(outFDs[1]); close(errFDs[1])
-        guard rc == 0 else {
-            close(outFDs[0]); close(errFDs[0])
-            throw ToolError("posix_spawn failed: \(String(cString: strerror(rc)))")
-        }
+        let proc = try ExecSpawn.spawn(command: command, cwd: cwd, env: env)
+        let pid = proc.pid
 
         let collector = OutputCollector(cap: cap)
-        let ioQueue = DispatchQueue(label: "oab-mc-agent.exec.io", attributes: .concurrent)
+        let ioQueue = DispatchQueue(label: "oab-instance-mcp.exec.io", attributes: .concurrent)
         let group = DispatchGroup()
-        for (fd, stream) in [(outFDs[0], 0), (errFDs[0], 1)] {
+        for (fd, stream) in [(proc.stdoutFD, 0), (proc.stderrFD, 1)] {
             group.enter()
             ioQueue.async {
                 let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)

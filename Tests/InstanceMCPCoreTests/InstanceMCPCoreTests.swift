@@ -1,6 +1,6 @@
 import ApplicationServices
 import XCTest
-@testable import MacAgentCore
+@testable import InstanceMCPCore
 
 // MARK: - helpers
 
@@ -403,5 +403,168 @@ final class OsascriptToolTests: XCTestCase {
         let r = try await OsascriptTool().call(arguments: ["script": "delay 30", "timeout_secs": 1])
         XCTAssertTrue(r.isError)
         XCTAssertEqual(r.structured?["timed_out"]?.boolValue, true)
+    }
+}
+
+// MARK: - cwd resolution
+
+final class ExecCwdTests: XCTestCase {
+    func testTildeExpands() {
+        guard case .ok(let p) = ExecCwd.resolve("~") else { return XCTFail("~ should resolve") }
+        XCTAssertEqual(p, NSHomeDirectory())
+    }
+
+    func testTildeSubpath() {
+        // ~/ + an existing subdir; use the home dir itself via "~/." to be portable.
+        guard case .ok(let p) = ExecCwd.resolve("~/.") else { return XCTFail() }
+        XCTAssertTrue(p.hasPrefix(NSHomeDirectory()))
+    }
+
+    func testNonexistentIsClearFailure() {
+        guard case .failure(let why) = ExecCwd.resolve("/no/such/dir/xyz") else { return XCTFail() }
+        XCTAssertTrue(why.contains("does not exist"), why)
+    }
+
+    func testFileIsNotADirectory() throws {
+        let tmp = NSTemporaryDirectory() + "oab-cwd-test-\(UUID().uuidString)"
+        FileManager.default.createFile(atPath: tmp, contents: Data("x".utf8))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        guard case .failure(let why) = ExecCwd.resolve(tmp) else { return XCTFail() }
+        XCTAssertTrue(why.contains("not a directory"), why)
+    }
+
+    func testRelativePathRejected() {
+        guard case .failure(let why) = ExecCwd.resolve("relative/path") else { return XCTFail() }
+        XCTAssertTrue(why.contains("absolute"), why)
+    }
+
+    func testNonexistentVolumeGivesFDAHint() {
+        guard case .failure(let why) = ExecCwd.resolve("/Volumes/NoSuchDisk123/x") else { return XCTFail() }
+        XCTAssertTrue(why.contains("Full Disk Access"), why)
+    }
+
+    func testExecToolRejectsBadCwd() async throws {
+        let r = try await ExecTool().call(arguments: ["command": "pwd", "cwd": "/no/such/dir/xyz"])
+        XCTAssertTrue(r.isError)
+        let text = r.content.first.flatMap { if case .text(let t) = $0 { return t } else { return nil } } ?? ""
+        XCTAssertTrue(text.contains("does not exist"), text)
+    }
+
+    func testExecToolTildeCwdWorks() async throws {
+        let r = try await ExecTool().call(arguments: ["command": "pwd", "cwd": "~"])
+        XCTAssertEqual(r.structured?["exit_code"]?.intValue, 0)
+        XCTAssertEqual(r.structured?["stdout"]?.stringValue?.trimmingCharacters(in: .newlines),
+                       (NSHomeDirectory() as NSString).resolvingSymlinksInPath)
+    }
+}
+
+// MARK: - job log files
+
+final class JobLogTests: XCTestCase {
+    func testReadLogIncremental() throws {
+        let path = NSTemporaryDirectory() + "oab-joblog-\(UUID().uuidString).out"
+        FileManager.default.createFile(atPath: path, contents: Data("hello".utf8))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let s1 = Job.readLog(path: path, from: 0)
+        XCTAssertEqual(String(decoding: s1.data, as: UTF8.self), "hello")
+        XCTAssertEqual(s1.nextOffset, 5)
+        let fh = FileHandle(forWritingAtPath: path)!
+        fh.seekToEndOfFile(); fh.write(Data(" world".utf8)); fh.closeFile()
+        let s2 = Job.readLog(path: path, from: s1.nextOffset)
+        XCTAssertEqual(String(decoding: s2.data, as: UTF8.self), " world")
+        XCTAssertEqual(s2.nextOffset, 11)
+    }
+
+    func testReadLogMissingFile() {
+        let r = Job.readLog(path: "/no/such/file.out", from: 0)
+        XCTAssertTrue(r.data.isEmpty)
+    }
+
+    func testStartupGCDeletesOldFiles() throws {
+        let dir = NSTemporaryDirectory() + "oab-jobs-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let old = dir + "/job-old.out"
+        let fresh = dir + "/job-fresh.out"
+        FileManager.default.createFile(atPath: old, contents: Data("x".utf8))
+        FileManager.default.createFile(atPath: fresh, contents: Data("y".utf8))
+        // Backdate `old` by 10 days.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-10 * 86400)], ofItemAtPath: old)
+        // Constructing a registry over this dir triggers cleanup of files > 7 days.
+        _ = JobRegistry(logDir: dir, maxAgeDays: 7)
+        // Allow the actor's init cleanup to run synchronously (it does, in init).
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old), "old file should be GC'd")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh), "fresh file should survive")
+    }
+}
+
+// MARK: - async exec jobs
+
+final class AsyncExecTests: XCTestCase {
+    func testStartPollExit() async throws {
+        let start = try await ExecStartTool().call(arguments: ["command": "echo hi; exit 0"])
+        let id = start.structured?["job_id"]?.stringValue
+        XCTAssertNotNil(id)
+        var poll: ToolResult? = nil
+        for _ in 0..<50 {
+            poll = try await ExecPollTool().call(arguments: ["job_id": .string(id!)])
+            if poll?.structured?["state"]?.stringValue != "running" { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(poll?.structured?["state"]?.stringValue, "exited")
+        XCTAssertEqual(poll?.structured?["exit_code"]?.intValue, 0)
+        XCTAssertTrue((poll?.structured?["stdout"]?.stringValue ?? "").contains("hi"))
+        // The log file path is reported and exists.
+        let outPath = poll?.structured?["out_path"]?.stringValue ?? ""
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outPath), outPath)
+    }
+
+    func testIncrementalPollAdvancesOffset() async throws {
+        let start = try await ExecStartTool().call(arguments: ["command": "echo one; sleep 0.3; echo two; exit 0"])
+        let id = start.structured?["job_id"]?.stringValue ?? ""
+        var next = 0
+        var seen = ""
+        for _ in 0..<50 {
+            let p = try await ExecPollTool().call(arguments: ["job_id": .string(id), "stdout_since": .number(Double(next))])
+            seen += p.structured?["stdout"]?.stringValue ?? ""
+            next = p.structured?["stdout_next"]?.intValue ?? next
+            if p.structured?["state"]?.stringValue != "running" { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(seen.contains("one"), seen)
+        XCTAssertTrue(seen.contains("two"), seen)
+    }
+
+    func testCancelKillsJob() async throws {
+        let start = try await ExecStartTool().call(arguments: ["command": "sleep 60 & wait"])
+        let id = start.structured?["job_id"]?.stringValue ?? ""
+        let c = try await ExecCancelTool().call(arguments: ["job_id": .string(id)])
+        XCTAssertEqual(c.structured?["signalled"]?.boolValue, true)
+        var poll: ToolResult? = nil
+        for _ in 0..<50 {
+            poll = try await ExecPollTool().call(arguments: ["job_id": .string(id)])
+            if poll?.structured?["state"]?.stringValue != "running" { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(poll?.structured?["state"]?.stringValue, "killed")
+    }
+
+    func testExecListShowsJob() async throws {
+        let start = try await ExecStartTool().call(arguments: ["command": "sleep 2 & wait"])
+        let id = start.structured?["job_id"]?.stringValue ?? ""
+        let list = try await ExecListTool().call(arguments: [:])
+        let ids = (list.structured?["jobs"]?.arrayValue ?? []).compactMap { $0["job_id"]?.stringValue }
+        XCTAssertTrue(ids.contains(id), "exec_list should include the running job")
+        _ = try await ExecCancelTool().call(arguments: ["job_id": .string(id)])
+    }
+
+    func testUnknownJobPollIsError() async throws {
+        let r = try await ExecPollTool().call(arguments: ["job_id": "job-nope"])
+        XCTAssertTrue(r.isError)
+    }
+
+    func testStartRejectsBadCwd() async throws {
+        let r = try await ExecStartTool().call(arguments: ["command": "pwd", "cwd": "/no/such/dir"])
+        XCTAssertTrue(r.isError)
     }
 }

@@ -9,12 +9,12 @@
 
 | Piece | Location |
 |---|---|
-| `@playwright/mcp@0.0.82` (pinned, `npm install --save-exact`) | `~/.local/oab-mac-agent/pw-mcp/` |
-| Wrapper script | `~/.local/oab-mac-agent/pw-mcp.sh` (copy in this dir) |
-| LaunchAgent (`gui/501`) | `~/Library/LaunchAgents/dev.openab.mac-agent.pw-mcp.plist` (copy in this dir) |
-| Persistent browser profile | `~/.local/oab-mac-agent/pw-profile/` |
-| Screenshot / snapshot output | `~/.local/oab-mac-agent/pw-output/` |
-| Logs | `~/Library/Logs/oab-mac-agent/pw-mcp.{log,err}` |
+| `@playwright/mcp@0.0.82` (pinned, `npm install --save-exact`) | `~/.local/oab-instance-mcp/pw-mcp/` |
+| Wrapper script | `~/.local/oab-instance-mcp/pw-mcp.sh` (copy in this dir) |
+| LaunchAgent (`gui/501`) | `~/Library/LaunchAgents/dev.openab.instance-mcp.pw-mcp.plist` (copy in this dir) |
+| Persistent browser profile | `~/.local/oab-instance-mcp/pw-profile/` |
+| Screenshot / snapshot output | `~/.local/oab-instance-mcp/pw-output/` |
+| Logs | `~/Library/Logs/oab-instance-mcp/pw-mcp.{log,err}` |
 | Listener | `127.0.0.1:8794` (loopback only) |
 | Tailnet URL | `https://macmini.<tailnet>.ts.net:8443/mcp` via `tailscale serve --bg --https=8443 http://127.0.0.1:8794` |
 
@@ -27,9 +27,9 @@ Client side (laptop): `kiro-cli mcp add --name macmini-browser --url https://mac
 ## Operate
 
 ```sh
-ssh macmini launchctl print gui/501/dev.openab.mac-agent.pw-mcp | grep -E 'state|pid'
-ssh macmini launchctl kickstart -k gui/501/dev.openab.mac-agent.pw-mcp   # restart
-ssh macmini tail -20 ~/Library/Logs/oab-mac-agent/pw-mcp.err
+ssh macmini launchctl print gui/501/dev.openab.instance-mcp.pw-mcp | grep -E 'state|pid'
+ssh macmini launchctl kickstart -k gui/501/dev.openab.instance-mcp.pw-mcp   # restart
+ssh macmini tail -20 ~/Library/Logs/oab-instance-mcp/pw-mcp.err
 ssh macmini /Applications/Tailscale.app/Contents/MacOS/Tailscale serve status
 ```
 
@@ -91,14 +91,14 @@ Latency is not the bottleneck; the LLM round trip is. Good enough for the thin-e
 ## What this proves for the design
 
 - The Aqua-session LaunchAgent + loopback listener + `tailscale serve` shape works and
-  needs no custom transport. The Swift `oab-mc-agent` (exec / screenshot / mouse / key /
+  needs no custom transport. The Swift `oab-instance-mcp` (exec / screenshot / mouse / key /
   osascript) will sit behind the same pattern on the next port.
 - Playwright MCP covers the browser half completely; the Swift daemon does not need to
   touch CDP. `connectOverCDP` from the sandbox was never needed.
 
 ## Next
 
-Step 2 shipped 2026-09-22: the Swift `oab-mc-agent` daemon (see top-level README) runs beside
+Step 2 shipped 2026-09-22: the Swift `oab-instance-mcp` daemon (see top-level README) runs beside
 this on `127.0.0.1:8795` → `tailscale serve --https=8444`, same LaunchAgent pattern, with
 `exec` / `screenshot` / `sys_info` and Tailscale-identity auth. Remaining for the browser
 half: a Tailscale ACL on :8443, and filtering `browser_run_code_unsafe` before any
