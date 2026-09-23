@@ -4,7 +4,7 @@ import CoreGraphics
 import Foundation
 import MacAgentCore
 
-let version = "0.3.0"
+let version = "0.3.1"
 
 struct Options {
     var host = "127.0.0.1"
@@ -97,11 +97,17 @@ let server = MCPServer(
     name: "oab-mc-agent",
     version: version,
     instructions: """
-        This server is a Mac (\(Host.current().localizedName ?? "unknown")) running in its logged-in \
-        desktop session. `exec` runs shell commands as the desktop user; `screenshot` returns what is \
-        on screen; `mouse` and `key` inject input (coordinates in display points, same as screenshot's \
-        `points`); `osascript` drives scriptable apps. Call `sys_info` first to learn displays and which \
-        permissions are granted. Typical loop: screenshot → decide → mouse/key → screenshot to confirm.
+        You are operating a real Mac (\(Host.current().localizedName ?? "unknown")) through its logged-in \
+        desktop session; a human may be watching the screen. Work in a see→act→see loop: `screenshot`, \
+        decide, `mouse`/`key`/`osascript`, then `screenshot` again to confirm — never assume an action landed.
+        Coordinates: `screenshot` at the default scale 1.0 returns one pixel per display point, and `mouse` \
+        takes display points, so image pixel (x,y) is the click target. To read small text (menu bar, dialogs) \
+        pass `region: {x,y,width,height}` with `scale: 2`; the crop's pixel (px,py) is point \
+        (region.x + px/2, region.y + py/2). Prefer `osascript` over pixel-hunting for scriptable apps \
+        (activate, quit, window titles, Safari URLs). If `osascript` times out, a permission dialog is \
+        probably showing: screenshot it and click Allow. `exec` is a plain `zsh -f` shell as the desktop user \
+        (add `/opt/homebrew/bin` to PATH via `env` if needed) and is the right tool for files and commands. \
+        Call `sys_info` when unsure which permissions or displays exist.
         """,
     tools: [SysInfoTool(agentVersion: version), ExecTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()]
 )
