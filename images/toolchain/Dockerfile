@@ -12,22 +12,36 @@
 #
 #   docker buildx build --platform linux/arm64,linux/amd64 -t oab-toolchain images/toolchain
 #
-# Conventions required by the adapter contract:
+# Conventions the adapters depend on (see ADR "Sandbox constraints" and
+# the OrbStack adapter mapping):
 # - /var/log/oab-jobs/    exec_start output files (<job_id>.out / .err)
 # - /workspace            default cwd for sandbox_exec
 # - non-root user `sandbox` (uid 1000); no sudo, no setuid helpers
 # - NO credentials baked in: tokens are injected per-session via
-#   sandbox_exec env (see ADR "State of record" / auth notes)
+#   sandbox_exec env (see ADR "Sandbox constraints" and "Auth changes")
+#
+# Trust anchors (audit before trusting a rebuild):
+# - Base image pinned by multi-arch manifest-list digest (covers arm64+amd64).
+#   Bump: `docker buildx imagetools inspect debian:bookworm-slim` and update
+#   the digest below after the smoke test passes.
+# - NodeSource apt key: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+#   (key ID 2F59B5F99B1BE0B4). Verify:
+#   gpg --show-keys --with-fingerprint /etc/apt/keyrings/nodesource.gpg
+# - GitHub CLI apt key: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+#   Current fingerprint is published in the official install docs
+#   (https://github.com/cli/cli/blob/trunk/docs/install_linux.md — the key
+#   was rotated in 2026, so verify against docs, not cached values):
+#   gpg --show-keys --with-fingerprint /etc/apt/keyrings/githubcli-archive-keyring.gpg
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 LABEL org.opencontainers.image.source="https://github.com/openabdev/instance-mcp" \
       org.opencontainers.image.title="oab-toolchain" \
       org.opencontainers.image.description="Sandbox toolchain image for the sandbox adapter (docs/adr/sandbox-adapter.md)" \
       org.opencontainers.image.base.name="docker.io/library/debian:bookworm-slim"
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8 \
+ARG DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8 \
     PIP_NO_CACHE_DIR=1
 
 # Base toolchain: python, node (NodeSource, keyring-verified apt source —

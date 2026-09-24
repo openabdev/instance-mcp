@@ -24,7 +24,7 @@ docker buildx build --platform linux/arm64,linux/amd64 -t oab-toolchain images/t
 ## Smoke test
 
 ```sh
-docker run --rm oab-toolchain bash -lc 'python3 --version && node --version && git --version && gh --version && test "$(id -u)" = "1000" && echo non-root-ok && test -w /var/log/oab-jobs && echo jobs-dir-ok'
+docker run --rm oab-toolchain bash -lc 'python3 --version && node --version && git --version && gh --version && jq --version && rg --version && test "$(id -u)" = "1000" && echo non-root-ok && test -w /var/log/oab-jobs && echo jobs-dir-ok'
 ```
 
 Expected: version lines, `non-root-ok`, `jobs-dir-ok`. (Network isolation — `oab-sandbox` bridge unreachable from host/tailnet — is verified by the adapter acceptance suite, not this image-level smoke test.)
