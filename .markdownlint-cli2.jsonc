@@ -5,6 +5,10 @@
     "default": true,
     // Long lines are fine in prose and tables.
     "MD013": false,
+    // Headings/lists not surrounded by blank lines: pre-existing style in
+    // docs/requirements/*. Re-enable after a dedicated docs cleanup pass.
+    "MD022": false,
+    "MD032": false,
     // Duplicate headings allowed when not siblings (e.g. per-adapter subsections).
     "MD024": { "siblings_only": true },
     // Inline HTML is used inside mermaid labels and tables.
@@ -12,6 +16,9 @@
     // Bold pseudo-headings are used for adapter entries.
     "MD036": false,
     // Some fenced blocks are plain-text diagrams without a language.
-    "MD040": false
+    "MD040": false,
+    // Existing ADR tables use compact style; MD060 flags them. Re-enable
+    // (or set an explicit style) after the docs cleanup pass.
+    "MD060": false
   }
 }

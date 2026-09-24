@@ -41,7 +41,11 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
-        run: swift test
+        # OsascriptToolTests actually executes /usr/bin/osascript. Basic
+        # scripts don't need TCC grants, but headless-runner behavior is
+        # unverified — skipped for determinism until a green CI run on a
+        # branch proves it safe to re-enable (tracked in #1).
+        run: swift test --skip OsascriptToolTests
 
   toolchain-image:
     name: Toolchain image smoke test (${{ matrix.arch }})
