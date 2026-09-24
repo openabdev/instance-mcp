@@ -2,3 +2,4 @@ node_modules/
 .build/
 *.xcuserstate
 .DS_Store
+__pycache__/
