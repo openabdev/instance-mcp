@@ -86,11 +86,27 @@ All tools reuse the semantics already established by the `exec` family (`timeout
 
 The schema must not leak backend details. The lifecycle (`PENDING` / `RUNNING` / `TERMINATED` on `sandbox_create` / `sandbox_list`) is designed in from day one, since some backends are async.
 
+### Sandbox constraints (all adapters)
+
+The "blast radius is a disposable sandbox" claim only holds if every adapter enforces the following defaults. These are part of the adapter contract, not implementation details:
+
+| Constraint | Default | Rationale |
+|---|---|---|
+| Host filesystem | **No host mounts.** Workspace lives inside the sandbox; data moves in/out via `sandbox_exec` (e.g. `git clone`, stdin/stdout). | A stolen bot token must not read host files. |
+| CPU | Hard limit per sandbox (OrbStack: `--cpus`; k3s: `resources.limits.cpu`; MicroVM: baseline sizing). | Prevent starving the host / other sandboxes. |
+| Memory | Hard limit per sandbox (OrbStack: `--memory`; k3s: `resources.limits.memory`). | Prevent OOM-ing the host. |
+| PIDs | Limit per sandbox (OrbStack: `--pids-limit`; k3s: pod PID limit). | Fork-bomb containment. |
+| Network | **No host/tailnet network access** (OrbStack: dedicated bridge network, never `--network host`; k3s: NetworkPolicy denying cluster/tailnet CIDRs). Public internet egress is allowed by default (toolchains need package registries and git remotes) and can be tightened per deployment. | A sandbox must not reach the gateway, other tailnet nodes, or the host's services. |
+| Privileges | No privileged mode, no added capabilities, no docker socket mount. | Container escape hardening. |
+| Concurrency | Per-caller cap on live sandboxes (gateway-enforced). | Bound total resource exposure from one token. |
+
+Adapter sections below describe the mechanism each backend uses to satisfy this contract.
+
 ### Adapters
 
 **OrbStack adapter — their own Mac mini (Phase 1)**
 
-- `sandbox_create` → `docker run -d <image> sleep infinity` (or `orbctl create` for machine-level isolation)
+- `sandbox_create` → `docker run -d --network oab-sandbox --cpus <n> --memory <m> --pids-limit <p> --security-opt no-new-privileges <image> sleep infinity` (or `orbctl create` for machine-level isolation). No host volumes, no `--privileged`, no docker socket. `oab-sandbox` is a dedicated bridge network with no route to the host or tailnet.
 - `sandbox_exec` → `docker exec`
 - `sandbox_terminate` → `docker rm -f`
 - Zero marginal cost; containers share the OrbStack Linux VM kernel (acceptable for trusted/semi-trusted OpenAB workloads).
@@ -134,7 +150,7 @@ sandbox_* schema (stable)
 **Positive**
 
 - Agent images stay slim; toolchain updates are decoupled from agent deployment.
-- A bot-scoped token's blast radius is a disposable sandbox — resolves the README's trust-model TODO.
+- A bot-scoped token's blast radius is a disposable sandbox — **provided the sandbox constraints above are enforced** — resolving the README's trust-model TODO.
 - The architecture is validated at zero marginal cost (OrbStack) before any paid backend is built.
 - Backends are swappable without agent changes; the user always owns the execution infrastructure.
 
@@ -154,6 +170,7 @@ sandbox_* schema (stable)
 ## Acceptance criteria
 
 - A bot-scoped token restricted to `sandbox_*` can create a sandbox, run `sandbox_exec` with poll semantics, and terminate it; the same token is denied on `exec`, `mouse`, `key`, `osascript`.
+- Sandbox constraints are enforced and negatively tested: no host filesystem visible from inside the sandbox; a fork bomb hits the PID limit without affecting the host; memory allocation beyond the limit is killed inside the sandbox; the gateway and tailnet addresses are unreachable from inside the sandbox; creating sandboxes beyond the per-caller cap is rejected.
 - `sandbox_exec` timeout kills the process group inside the container and reports `timed_out=true`, exit 137.
 - `ttl_secs` reaps forgotten sandboxes; `sandbox_list` reflects lifecycle states.
 - Verified end-to-end from a remotely-hosted openab-pty over the tailnet (`tailscale serve :8444`).
