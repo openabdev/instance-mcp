@@ -97,9 +97,9 @@ The schema must not leak backend details.
 
 **Ownership.** Every sandbox is owned by the caller identity (token) that created it. `sandbox_list` returns only the caller's sandboxes; `sandbox_exec*` and `sandbox_terminate` on a sandbox owned by another caller fail with `denied` — a sandbox belonging to caller B is unaddressable and invisible to caller A. The owner token may address all sandboxes for operational cleanup.
 
-**Lifecycle.** `PENDING → RUNNING → TERMINATED`, plus `FAILED` for creations that never reach `RUNNING` (e.g. image pull error). `FAILED` and `TERMINATED` carry a `state_reason` (`user_requested`, `ttl_expired`, `create_error: <detail>`, …). Reaped and failed sandboxes remain visible in `sandbox_list` for a retention window (with their `state_reason`) so callers can distinguish "I terminated it" from "it was reaped" from "it never started".
+**Lifecycle.** States: `PENDING → RUNNING → TERMINATED`, plus `FAILED` for creations that never reach `RUNNING` (e.g. image pull error). Edges: `PENDING → RUNNING` (provisioning succeeded), `PENDING → FAILED` (provisioning error), `PENDING → TERMINATED` (caller terminates during provisioning — the adapter cancels/cleans up), `RUNNING → TERMINATED`. `sandbox_terminate` is valid in any non-terminal state and idempotent in terminal states. `FAILED` and `TERMINATED` carry a `state_reason` (`user_requested`, `ttl_expired`, `create_error: <detail>`, `external`, …). Reaped and failed sandboxes remain visible in `sandbox_list` for a retention window (with their `state_reason`) so callers can distinguish "I terminated it" from "it was reaped" from "it never started".
 
-**`ttl_secs` semantics.** Absolute maximum lifetime measured from creation — a safety net against forgotten sandboxes, not an idle timer. It terminates the sandbox even mid-job; callers running long jobs should size `ttl_secs` accordingly and terminate explicitly when done. (This matches k3s `activeDeadlineSeconds` and the MicroVM 8-hour maximum duration. Idle-based reaping is a possible future extension and would be a separate parameter.)
+**`ttl_secs` semantics.** Absolute maximum lifetime — a safety net against forgotten sandboxes, not an idle timer. **The clock starts at the gateway's acceptance of `sandbox_create`** (the timestamp is recorded in backend metadata at creation), so `PENDING` time counts toward the TTL and reap time is deterministic across adapters, async or not. It terminates the sandbox even mid-job; callers running long jobs should size `ttl_secs` accordingly and terminate explicitly when done. (This matches k3s `activeDeadlineSeconds` and the MicroVM 8-hour maximum duration. Idle-based reaping is a possible future extension and would be a separate parameter.)
 
 **Resources.** `cpu` / `memory_mb` on `sandbox_create` are optional requests, clamped to gateway-configured per-sandbox maximums; when omitted, gateway-configured defaults apply. This keeps the k3s quota claim honest: quotas are set from these schema-level values, not invented per backend.
 
@@ -116,7 +116,7 @@ The "blast radius is a disposable sandbox" claim only holds if every adapter enf
 | Network | **No host/tailnet network access** (OrbStack: dedicated bridge network, never `--network host`; k3s: NetworkPolicy denying cluster/tailnet CIDRs). Public internet egress is allowed by default (toolchains need package registries and git remotes) and can be tightened per deployment. | A sandbox must not reach the gateway, other tailnet nodes, or the host's services. |
 | Privileges | No privileged mode, no added capabilities, no docker socket mount. | Container escape hardening. |
 | Concurrency | Per-caller cap on live sandboxes (gateway-enforced). | Bound total resource exposure from one token. |
-| `ttl_secs` cap | Gateway-configured maximum (callers cannot request unbounded lifetimes). | Bound resource-holding DoS. |
+| `ttl_secs` cap | Gateway-configured maximum; requests above the cap are **rejected** with a typed `ttl_exceeds_cap` error (never silently clamped). | Bound resource-holding DoS; deterministic caller-visible behavior. |
 
 ### The adapter contract
 
@@ -134,6 +134,12 @@ Each adapter implements the following operations. This table — not the mermaid
 
 Errors are typed and backend-neutral; adapters map backend-specific failures onto this error model. Caller-facing authorization (`denied`) is enforced by the gateway before the adapter is invoked.
 
+**State of record.** Ownership, creation timestamp, and `ttl_secs` are stored as **backend metadata at creation time** (OrbStack/docker: container labels `oab.owner` / `oab.created_at` / `oab.ttl_secs`; k3s: pod labels/annotations; MicroVM: resource tags). The gateway's in-memory registry is a rebuildable cache, never the source of truth. Consequences:
+
+- **Restart recovery:** on startup the gateway rebuilds ownership and state by listing the backend and reading metadata — no orphaned sandboxes.
+- **Reaper survives restarts:** the TTL reaper computes deadlines from backend metadata (`created_at + ttl_secs`), not from in-memory timers, so the "TTL is the backstop" guarantee holds across gateway restarts.
+- **Reconciliation:** a periodic pass compares registry against backend truth; sandboxes killed externally (manual `docker kill`, OOM, host reboot) are marked `TERMINATED` with `state_reason: external`, and stale registry entries with no backend counterpart are pruned. Retention-window bookkeeping for `FAILED`/`TERMINATED` entries is gateway-local and best-effort — after a restart, terminal-state history may be lost, but live-sandbox correctness never depends on it.
+
 ### Adapters
 
 **OrbStack adapter — their own Mac mini (Phase 1)**
@@ -141,7 +147,7 @@ Errors are typed and backend-neutral; adapters map backend-specific failures ont
 - `create` → `docker run -d --network oab-sandbox --cpus <n> --memory <m> --pids-limit <p> --security-opt no-new-privileges <image> sleep infinity` (or `orbctl create` for machine-level isolation). No host volumes, no `--privileged`, no docker socket. `oab-sandbox` is a dedicated bridge network with no route to the host or tailnet.
 - `exec` → `docker exec`
 - `exec_start` / `poll` / `cancel` → `docker exec -d` wrapping the command with `setsid … > /var/log/oab-jobs/<job_id>.out 2> ….err`; poll reads byte offsets via `docker exec dd`; cancel signals the process group — the same job contract as the host `exec_start` family, executed inside the container.
-- `list` → `docker ps` + gateway-side ownership/state registry
+- `list` → `docker ps --filter label=oab.owner` — labels are the state of record; the gateway registry is a cache rebuilt from them (see "State of record")
 - `terminate` → `docker rm -f`
 - Zero marginal cost; containers share the OrbStack Linux VM kernel (acceptable for trusted/semi-trusted OpenAB workloads).
 
@@ -214,7 +220,8 @@ What Phase 1 does **not** defend against: a kernel exploit from inside a sandbox
 - A bot-scoped token restricted to `sandbox_*` can create a sandbox, run `sandbox_exec` with poll semantics, and terminate it; the same token is denied on `exec`, `mouse`, `key`, `osascript`.
 - **Default deny:** a token with no allowlist entry is denied every tool.
 - **Ownership:** bot token A cannot `sandbox_list`, `sandbox_exec`, or `sandbox_terminate` a sandbox created by bot token B.
-- Sandbox constraints are enforced and negatively tested: no host filesystem visible from inside the sandbox; a fork bomb hits the PID limit without affecting the host; memory allocation beyond the limit is killed inside the sandbox; the gateway and tailnet addresses are unreachable from inside the sandbox; creating sandboxes beyond the per-caller cap is rejected; a `ttl_secs` above the gateway cap is clamped or rejected.
+- Sandbox constraints are enforced and negatively tested: no host filesystem visible from inside the sandbox; a fork bomb hits the PID limit without affecting the host; memory allocation beyond the limit is killed inside the sandbox; the gateway and tailnet addresses are unreachable from inside the sandbox; creating sandboxes beyond the per-caller cap is rejected; a `ttl_secs` above the gateway cap is **rejected with `ttl_exceeds_cap`**.
+- **Restart recovery:** after a gateway restart, a pre-existing sandbox is still listed with its owner, remains addressable by that owner only, and is still reaped at its original `created_at + ttl_secs` deadline. A sandbox killed externally while the gateway was down appears as `TERMINATED` with `state_reason: external` after reconciliation.
 - `sandbox_exec` timeout kills the process group inside the container and reports `timed_out=true`, exit 137.
 - `ttl_secs` reaps forgotten sandboxes; `sandbox_list` reflects lifecycle states including `FAILED` and `state_reason`.
 - A failed creation (e.g. nonexistent image) surfaces as `FAILED` with a `create_error` reason, distinguishable from `TERMINATED`.
