@@ -1,0 +1,73 @@
+# STAGED WORKFLOW — move to .github/workflows/ci.yml
+# (the GitHub App lacked the `workflows` permission to place it there directly)
+#
+#   git mv ci-staging/ci.yml .github/workflows/ci.yml && rmdir ci-staging
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Fork-PR risk assessment (B11): fork PRs run with a read-only
+    # GITHUB_TOKEN (enforced by `permissions:` below), this workflow uses
+    # no secrets, and runners are ephemeral — so building/running a
+    # PR-supplied Dockerfile is contained to the throwaway runner.
+    # pull_request_target is deliberately NOT used (it would grant
+    # PR-controlled code a privileged token — the more dangerous pattern).
+
+# Least privilege: read-only token for every job (B11 security review).
+permissions:
+  contents: read
+
+jobs:
+  markdown-lint:
+    name: Markdown lint (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19
+        with:
+          globs: |
+            docs/**/*.md
+
+  swift:
+    name: Swift build & test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        # OsascriptToolTests actually executes /usr/bin/osascript. Basic
+        # scripts don't need TCC grants, but headless-runner behavior is
+        # unverified — skipped for determinism until a green CI run on a
+        # branch proves it safe to re-enable (tracked in #1).
+        run: swift test --skip OsascriptToolTests
+
+  toolchain-image:
+    name: Toolchain image smoke test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build
+        # --pull: always fetch the base image from the registry so a stale
+        # runner cache can't mask upstream changes (digest-pinned anyway).
+        run: docker build --pull -t oab-toolchain images/toolchain
+      - name: Smoke test
+        run: |
+          docker run --rm oab-toolchain bash -lc '
+            python3 --version && node --version && git --version &&
+            gh --version && jq --version && rg --version &&
+            test "$(id -u)" = "1000" && echo non-root-ok &&
+            test -w /var/log/oab-jobs && echo jobs-dir-ok'
