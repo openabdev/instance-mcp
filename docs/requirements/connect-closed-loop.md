@@ -5,7 +5,7 @@
 
 ## Statement
 
-Using OpenAB Connect (`the OpenAB Connect repo`, the native macOS/iOS client for `openab-pty`):
+Using OpenAB Connect (the native macOS/iOS client for `openab-pty`, separate repo):
 
 1. **Observe** — Connect can *attach the Mac agent's screen session* the same way it attaches
    a PTY session today: pick the Mac mini in the session list and see its live desktop

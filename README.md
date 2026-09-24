@@ -5,6 +5,11 @@ a thin daemon that lives in a Mac's logged-in desktop session and exposes the ma
 coding CLI or agent elsewhere on the tailnet as **MCP servers**. Nothing here is smart; all
 the intelligence stays in the caller.
 
+> **Read before deploying.** `exec` is an unrestricted shell as the logged-in user, and `mouse` /
+> `key` / `osascript` drive the desktop. Access is gated by Tailscale identity **and** a bearer
+> token, nothing finer. Run this only on a Mac you own, for callers you would hand your keyboard
+> to; on a shared tailnet, an allow-list of one login is the intended shape.
+
 ```mermaid
 flowchart LR
     subgraph callers["Callers — the brain (anywhere on the tailnet)"]
@@ -88,7 +93,7 @@ Configured checks are **AND**-combined: a request must pass every check that is 
   compared. **`deploy.sh` now generates one at `~/.config/oab-instance-mcp/token` (mode 600) and passes
   `--token-file`**, so the deployed agent requires *both* an allow-listed Tailscale login *and* the
   bearer token. This is defence-in-depth: a leaked tailnet auth key that enrols a node as
-  `you@example.com` passes the login check but still gets `401` without the token (verified
+  your Tailscale login passes the login check but still gets `401` without the token (verified
   2026-09-23: no token → 401, correct token → 200, wrong token → 401). The token is stable across
   re-deploys; rotate by deleting the file and re-deploying. The menu bar shows a masked form and
   copies the full token (see below); it is never written to `agent.log`.
@@ -112,12 +117,14 @@ read the RAID (TCC on external volumes).
 ## Deploy (run on the target)
 
 ```sh
-ssh macmini 'cd ~/src/oab-instance-mcp && bash scripts/deploy.sh you@example.com'
+ssh macmini 'cd ~/src/oab-instance-mcp && \
+  KEYCHAIN=~/Library/Keychains/signing.keychain-db KEYCHAIN_PASSWORD_FILE=~/.config/signing/keychain-password \
+  bash scripts/deploy.sh you@example.com <codesign-identity-sha1>'
 ```
 
 `deploy.sh` wraps the binary in `~/.local/oab-instance-mcp/oab-instance-mcp.app` (bundle id
 `dev.openab.instance-mcp`) so TCC grants bind to a stable identity, signs it with the
-`<team-id>` Apple Development cert, installs LaunchAgent `dev.openab.instance-mcp` in `gui/501`,
+given Apple Development identity (any cert of yours; TCC grants are keyed on identity + bundle id, so keep using the same one), installs LaunchAgent `dev.openab.instance-mcp` in `gui/501`,
 and runs `tailscale serve --bg --https=8444 http://127.0.0.1:8795`.
 
 Then, once, on the Mac's own screen, System Settings → Privacy & Security:
@@ -134,7 +141,7 @@ Client (the deployed agent requires the bearer token — copy it from the menu b
 `deploy.sh` summary and pass it as a header):
 
 ```sh
-kiro-cli mcp add --name macmini-mcp --url https://macmini.<tailnet>.ts.net:8444/mcp \
+kiro-cli mcp add --name macmini-mcp --url https://<host>.<tailnet>.ts.net:8444/mcp \
   --header "Authorization: Bearer $(ssh macmini cat ~/.config/oab-instance-mcp/token)" \
   --scope global --timeout 30000
 ```
@@ -154,7 +161,7 @@ ssh macmini 'launchctl print gui/501/dev.openab.instance-mcp | grep -E "state|pi
 ssh macmini 'tail -20 ~/Library/Logs/oab-instance-mcp/agent.log'      # one line per session open / tools/call / deny
 ssh macmini 'launchctl kickstart -k gui/501/dev.openab.instance-mcp'  # restart
 ssh macmini '/Applications/Tailscale.app/Contents/MacOS/Tailscale serve status'
-curl -s https://macmini.<tailnet>.ts.net:8444/healthz
+curl -s https://<host>.<tailnet>.ts.net:8444/healthz
 ssh macmini 'ls -lt ~/Library/Logs/oab-instance-mcp/jobs/'             # exec_start job logs (<id>.out/.err), GC'd after 7 days
 ssh macmini 'tail -f ~/Library/Logs/oab-instance-mcp/jobs/<job_id>.out'  # follow a background build live
 ```
@@ -168,7 +175,7 @@ Measured from the laptop: `sys_info` 0.75 s, `exec` 0.47 s, a 1 s exec timeout r
   the `[weak self]` handlers were no-ops. `curl` hung to its timeout with no server log line.
 - **`codesign` over SSH → `errSecInternalComponent`** for anything in the login keychain, with
   or without `ssh -t`. Sign from a dedicated keychain whose password is on disk
-  (`~/.config/signing/`), passing `--keychain` explicitly.
+  (`KEYCHAIN` / `KEYCHAIN_PASSWORD_FILE` in `deploy.sh`), passing `--keychain` explicitly.
 - **`kiro-cli mcp add --force` truncated `~/.kiro/settings/mcp.json` to 0 bytes** the second
   time it was used in a session. Back the file up before `mcp add`, or edit it by hand.
 - **macOS has no `timeout`.** Remote scripts bound steps with `perl -e 'alarm shift; exec @ARGV'`

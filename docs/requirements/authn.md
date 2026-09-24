@@ -1,6 +1,6 @@
 # Design — bearer-token authn as defence-in-depth for the MCP endpoint
 
-> Recorded 2026-09-23 . Implements the "two callers, two trust levels, one daemon"
+> Recorded 2026-09-23. Implements the "two callers, two trust levels, one daemon"
 > constraint from [`connect-closed-loop.md`](connect-closed-loop.md), first slice: add a
 > shared bearer token so a leaked tailnet credential alone cannot reach the agent.
 
@@ -8,7 +8,7 @@
 
 `oab-instance-mcp` runs on macmini bound to loopback; `tailscale serve --https=8444` terminates
 TLS and injects `Tailscale-User-Login`, and `AuthPolicy` checks it against
-`--allow-login you@example.com`. Today that is the *only* control (no `--token` in the
+`--allow-login <owner-login>`. Today that is the *only* control (no `--token` in the
 deployed LaunchAgent). OpenAB Connect's `MacAgentClient` connects straight to
 `https://macmini.<tailnet>.ts.net:8444/mcp` and sends **no** `Authorization` header — its own
 comment states "nothing here is a secret — auth is the caller's Tailscale identity".
@@ -21,9 +21,9 @@ client-supplied header — verified). But that identity is only as strong as tai
 enrolment:
 
 - An **ephemeral auth key** (`tskey-auth-…`) that leaks lets anyone `tailscale up --authkey`
-  a node into your-tailnet.
-- If that key is **user-owned** (`you@example.com`), the enrolled node presents
-  `Tailscale-User-Login: you@example.com`, passes `--allow-login`, and reaches the full
+  a node into the tailnet.
+- If that key is **user-owned** (issued under the owner's login), the enrolled node presents
+  `Tailscale-User-Login: <owner-login>`, passes `--allow-login`, and reaches the full
   `exec` shell. (A **tagged** key — `tag:…` — has no user login and would be denied, but we
   cannot assume every enrolment path is tagged.)
 
@@ -87,7 +87,7 @@ profile.
 - `AuthPolicy`: no code change (AND semantics already present); covered by existing tests.
 - `README.md`: document that the deployed agent now requires a bearer token.
 
-### oab-pty-mac (OpenAB Connect)
+### OpenAB Connect (client side)
 - `ScreenProfile`: add non-persisted `token` + a Keychain helper (`ScreenTokenStore`) keyed by
   profile name; `ScreenStore.save/remove` write/delete the Keychain item.
 - `SidebarScreens.presentScreenSheet`: add a "Token" field (optional; blank = no token, for

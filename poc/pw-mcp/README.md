@@ -10,21 +10,25 @@
 | Piece | Location |
 |---|---|
 | `@playwright/mcp@0.0.82` (pinned, `npm install --save-exact`) | `~/.local/oab-instance-mcp/pw-mcp/` |
-| Wrapper script | `~/.local/oab-instance-mcp/pw-mcp.sh` (copy in this dir) |
-| LaunchAgent (`gui/501`) | `~/Library/LaunchAgents/dev.openab.instance-mcp.pw-mcp.plist` (copy in this dir) |
+| Wrapper script | `~/.local/oab-instance-mcp/pw-mcp.sh` (from `pw-mcp.sh` here) |
+| LaunchAgent (`gui/<uid>`) | `~/Library/LaunchAgents/dev.openab.instance-mcp.pw-mcp.plist` (rendered by `install.sh`) |
 | Persistent browser profile | `~/.local/oab-instance-mcp/pw-profile/` |
 | Screenshot / snapshot output | `~/.local/oab-instance-mcp/pw-output/` |
 | Logs | `~/Library/Logs/oab-instance-mcp/pw-mcp.{log,err}` |
 | Listener | `127.0.0.1:8794` (loopback only) |
-| Tailnet URL | `https://macmini.<tailnet>.ts.net:8443/mcp` via `tailscale serve --bg --https=8443 http://127.0.0.1:8794` |
+| Tailnet URL | `https://<host>.<tailnet>.ts.net:8443/mcp` via `tailscale serve --bg --https=8443 http://127.0.0.1:8794` |
 
 Browser: Playwright's bundled Chromium (`~/Library/Caches/ms-playwright/chromium-1246`),
 **headed**, spawned as a child of the LaunchAgent pid, so it is a real window in the
 logged-in desktop session. No Google Chrome is installed on macmini.
 
-Client side (laptop): `kiro-cli mcp add --name macmini-browser --url https://macmini.<tailnet>.ts.net:8443/mcp --scope global --timeout 20000`.
+Client side (laptop): `kiro-cli mcp add --name macmini-browser --url https://<host>.<tailnet>.ts.net:8443/mcp --scope global --timeout 20000`.
 
-## Operate
+## Install / operate
+
+```sh
+ssh macmini 'cd ~/src/oab-instance-mcp && bash poc/pw-mcp/install.sh'   # idempotent
+```
 
 ```sh
 ssh macmini launchctl print gui/501/dev.openab.instance-mcp.pw-mcp | grep -E 'state|pid'
@@ -57,7 +61,7 @@ Latency is not the bottleneck; the LLM round trip is. Good enough for the thin-e
 ## Gotchas (each cost a restart)
 
 1. **`--allowed-hosts` is an exact string match on the `Host` header, port included.**
-   `macmini.<tailnet>.ts.net` does *not* cover `macmini.<tailnet>.ts.net:8443`, and
+   `<host>.<tailnet>.ts.net` does *not* cover `<host>.<tailnet>.ts.net:8443`, and
    `127.0.0.1` does not cover `127.0.0.1:8794`. List every form the proxy will forward.
    (`tailscale serve` forwards the original Host, with port.)
 2. **Default browser channel is `chrome`, not bundled Chromium.** Without

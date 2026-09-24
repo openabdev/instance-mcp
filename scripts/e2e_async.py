@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # End-to-end driver: exec_start a build on the RAID path, poll incrementally, print result.
-import json, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 
 BASE = "http://127.0.0.1:8795/mcp"
 HDR = ["-H", "Content-Type: application/json", "-H", "Connection: close",
-       "-H", "Tailscale-User-Login: you@example.com"]
+       "-H", "Tailscale-User-Login: " + os.environ.get("ALLOW_LOGIN", "you@example.com")]
 
 def curl(body, sid=None, want_headers=False):
     args = ["curl", "-s", "-m", "60", "-X", "POST", BASE] + HDR
@@ -24,7 +24,7 @@ def call(name, args, id=9):
     return json.loads(r)["result"]["structuredContent"]
 
 CMD = sys.argv[1] if len(sys.argv) > 1 else "echo BUILD-START; ls; sleep 1; echo BUILD-DONE"
-CWD = sys.argv[2] if len(sys.argv) > 2 else "~/build/oab-pty-mac"
+CWD = sys.argv[2] if len(sys.argv) > 2 else "~"
 
 start = call("exec_start", {"command": CMD, "cwd": CWD, "timeout_secs": 120})
 print("START:", start.get("job_id"), "pid", start.get("pid"), "state", start.get("state"))

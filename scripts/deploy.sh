@@ -1,12 +1,15 @@
 #!/bin/bash
 # Deploy oab-instance-mcp on this Mac (run ON the target, e.g. macmini).
-#   scripts/deploy.sh <allow-login-email> [signing-identity-hash]
+#   scripts/deploy.sh <allow-login-email> <codesign-identity>
+#   env: KEYCHAIN=<path to keychain-db>            keychain holding the identity (default: login keychain)
+#        KEYCHAIN_PASSWORD_FILE=<path>              if set, unlock $KEYCHAIN first (needed over non-interactive
+#                                                   SSH: the login keychain answers errSecInternalComponent)
 # - wraps the release binary in a minimal .app so TCC grants bind to a stable bundle id
 # - signs it (Apple Development is enough for a local LaunchAgent; no notarization needed)
 # - installs a LaunchAgent in gui/<uid> and `tailscale serve --https=8444`
 set -euo pipefail
-LOGIN="${1:?usage: deploy.sh <allow-login-email> [identity]}"
-IDENTITY="${2:-<codesign-identity>}"   # Apple Development, team <team-id>
+LOGIN="${1:?usage: deploy.sh <allow-login-email> <codesign-identity>}"
+IDENTITY="${2:?usage: deploy.sh <allow-login-email> <codesign-identity>   (SHA-1 or name of an Apple Development cert)}"
 PORT=8795; HTTPS_PORT=8444
 LABEL=dev.openab.instance-mcp
 BUNDLE_ID=dev.openab.instance-mcp
@@ -70,12 +73,14 @@ cat >"$APP/Contents/Info.plist" <<EOF
   <key>NSHumanReadableCopyright</key><string>OpenAB</string>
 </dict></plist>
 EOF
-# The <team-id> dev identity lives in a dedicated keychain whose password is on
-# disk (see ~/.config/signing/README.md). The login keychain
-# refuses codesign over non-interactive SSH (errSecInternalComponent).
-KEYCHAIN="$HOME/Library/Keychains/signing.keychain-db"
-security unlock-keychain -p "$(cat "$HOME/.config/signing/keychain-password")" "$KEYCHAIN"
-codesign --force --options runtime --timestamp=none --keychain "$KEYCHAIN" --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+# Over non-interactive SSH the login keychain refuses codesign (errSecInternalComponent);
+# keep the identity in a dedicated keychain and point KEYCHAIN / KEYCHAIN_PASSWORD_FILE at it.
+KC_ARGS=()
+if [ -n "${KEYCHAIN:-}" ]; then
+  [ -z "${KEYCHAIN_PASSWORD_FILE:-}" ] || security unlock-keychain -p "$(cat "$KEYCHAIN_PASSWORD_FILE")" "$KEYCHAIN"
+  KC_ARGS=(--keychain "$KEYCHAIN")
+fi
+codesign --force --options runtime --timestamp=none "${KC_ARGS[@]}" --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP" && echo "signed: $(codesign -dv "$APP" 2>&1 | grep -E '^(Authority=Apple Dev|TeamIdentifier)' | tr '\n' ' ')"
 
 echo "--- LaunchAgent $LABEL ---"
