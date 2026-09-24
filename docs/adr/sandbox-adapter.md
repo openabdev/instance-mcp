@@ -15,6 +15,10 @@ instance-mcp is already the "hands" half of the brain/hands split: a thin MCP da
 
 We need a way for an OAB agent — running in a lightweight container (0.25 vCPU / 512 MB class), wherever it is hosted — to execute tool calls in isolated, disposable environments, on infrastructure the user owns, without ever holding raw host access.
 
+### Inspiration
+
+This design is inspired by [AWS Lambda MicroVMs](https://aws.amazon.com/about-aws/whats-new/2026/06/aws-lambda-microvms/) (announced 2026-06): disposable, VM-isolated, snapshot-launched sandboxes purpose-built for running user- or AI-generated code, with suspend-on-idle billing. We generalize the same "disposable sandbox for the toolchain" idea into a backend-agnostic adapter, so it runs not only on AWS but also on the user's own hardware.
+
 ## Decision
 
 We will add a **`sandbox_*` MCP tool family** to instance-mcp, backed by a **sandbox adapter** interface (the classic adapter pattern): one stable tool schema, translated by pluggable adapters to concrete backends.
