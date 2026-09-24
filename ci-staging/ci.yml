@@ -1,0 +1,57 @@
+# STAGED WORKFLOW — move to .github/workflows/ci.yml
+# (the GitHub App lacked the `workflows` permission to place it there directly)
+#
+#   git mv ci-staging/ci.yml .github/workflows/ci.yml && rmdir ci-staging
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  markdown-lint:
+    name: Markdown lint (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            docs/**/*.md
+
+  swift:
+    name: Swift build & test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  toolchain-image:
+    name: Toolchain image smoke test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t oab-toolchain images/toolchain
+      - name: Smoke test
+        run: |
+          docker run --rm oab-toolchain bash -lc '
+            python3 --version && node --version && git --version &&
+            gh --version && jq --version && rg --version &&
+            test "$(id -u)" = "1000" && echo non-root-ok &&
+            test -w /var/log/oab-jobs && echo jobs-dir-ok'

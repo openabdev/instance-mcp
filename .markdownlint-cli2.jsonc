@@ -1,0 +1,17 @@
+{
+  // markdownlint-cli2 config for docs/**.
+  // Tuned to the existing ADR/docs style; tighten incrementally.
+  "config": {
+    "default": true,
+    // Long lines are fine in prose and tables.
+    "MD013": false,
+    // Duplicate headings allowed when not siblings (e.g. per-adapter subsections).
+    "MD024": { "siblings_only": true },
+    // Inline HTML is used inside mermaid labels and tables.
+    "MD033": false,
+    // Bold pseudo-headings are used for adapter entries.
+    "MD036": false,
+    // Some fenced blocks are plain-text diagrams without a language.
+    "MD040": false
+  }
+}
