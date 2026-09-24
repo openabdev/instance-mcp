@@ -10,6 +10,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: read-only token for every job (B11 security review).
+permissions:
+  contents: read
+
 jobs:
   markdown-lint:
     name: Markdown lint (docs)
