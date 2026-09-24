@@ -140,6 +140,8 @@ Errors are typed and backend-neutral; adapters map backend-specific failures ont
 - **Reaper survives restarts:** the TTL reaper computes deadlines from backend metadata (`created_at + ttl_secs`), not from in-memory timers, so the "TTL is the backstop" guarantee holds across gateway restarts.
 - **Reconciliation:** a periodic pass compares registry against backend truth; sandboxes killed externally (manual `docker kill`, OOM, host reboot) are marked `TERMINATED` with `state_reason: external`, and stale registry entries with no backend counterpart are pruned. Retention-window bookkeeping for `FAILED`/`TERMINATED` entries is gateway-local and best-effort — after a restart, terminal-state history may be lost, but live-sandbox correctness never depends on it.
 
+**Job state does not survive gateway restarts (explicit boundary).** The `job_id → sandbox` registry is gateway-local by design. After a gateway restart, `exec_poll` / `exec_cancel` for a pre-restart job return `job_not_found` — deterministically, never a wrong job's output. The job's process may still be running inside the sandbox (it was started with `setsid`), and its output files persist at the documented path (`/var/log/oab-jobs/<job_id>.{out,err}`), so a caller receiving `job_not_found` should treat the outcome as unknown and recover via `sandbox_exec`: inspect the output files, check for the process, and kill or re-run as appropriate. Backend-persisting job metadata (e.g. labels) to make job control survive restarts is a possible future extension, not a Phase 1 guarantee.
+
 ### Adapters
 
 **OrbStack adapter — their own Mac mini (Phase 1)**
@@ -147,7 +149,7 @@ Errors are typed and backend-neutral; adapters map backend-specific failures ont
 - `create` → `docker run -d --network oab-sandbox --cpus <n> --memory <m> --pids-limit <p> --security-opt no-new-privileges <image> sleep infinity` (or `orbctl create` for machine-level isolation). No host volumes, no `--privileged`, no docker socket. `oab-sandbox` is a dedicated bridge network with no route to the host or tailnet.
 - `exec` → `docker exec`
 - `exec_start` / `poll` / `cancel` → `docker exec -d` wrapping the command with `setsid … > /var/log/oab-jobs/<job_id>.out 2> ….err`; poll reads byte offsets via `docker exec dd`; cancel signals the process group — the same job contract as the host `exec_start` family, executed inside the container.
-- `list` → `docker ps --filter label=oab.owner` — labels are the state of record; the gateway registry is a cache rebuilt from them (see "State of record")
+- `list` → `docker ps --filter label=oab.owner=<owner>` (filtered by owner **value**, with gateway-side re-filtering as defense in depth, so other owners' sandboxes never appear) — labels are the state of record; the gateway registry is a cache rebuilt from them (see "State of record")
 - `terminate` → `docker rm -f`
 - Zero marginal cost; containers share the OrbStack Linux VM kernel (acceptable for trusted/semi-trusted OpenAB workloads).
 
@@ -221,7 +223,7 @@ What Phase 1 does **not** defend against: a kernel exploit from inside a sandbox
 - **Default deny:** a token with no allowlist entry is denied every tool.
 - **Ownership:** bot token A cannot `sandbox_list`, `sandbox_exec`, or `sandbox_terminate` a sandbox created by bot token B.
 - Sandbox constraints are enforced and negatively tested: no host filesystem visible from inside the sandbox; a fork bomb hits the PID limit without affecting the host; memory allocation beyond the limit is killed inside the sandbox; the gateway and tailnet addresses are unreachable from inside the sandbox; creating sandboxes beyond the per-caller cap is rejected; a `ttl_secs` above the gateway cap is **rejected with `ttl_exceeds_cap`**.
-- **Restart recovery:** after a gateway restart, a pre-existing sandbox is still listed with its owner, remains addressable by that owner only, and is still reaped at its original `created_at + ttl_secs` deadline. A sandbox killed externally while the gateway was down appears as `TERMINATED` with `state_reason: external` after reconciliation.
+- **Restart recovery:** after a gateway restart, a pre-existing sandbox is still listed with its owner, remains addressable by that owner only, and is still reaped at its original `created_at + ttl_secs` deadline. A sandbox killed externally while the gateway was down appears as `TERMINATED` with `state_reason: external` after reconciliation. `exec_poll` for a pre-restart job returns `job_not_found` (never another job's output), and the job's output files remain retrievable via `sandbox_exec` at `/var/log/oab-jobs/<job_id>.{out,err}`.
 - `sandbox_exec` timeout kills the process group inside the container and reports `timed_out=true`, exit 137.
 - `ttl_secs` reaps forgotten sandboxes; `sandbox_list` reflects lifecycle states including `FAILED` and `state_reason`.
 - A failed creation (e.g. nonexistent image) surfaces as `FAILED` with a `create_error` reason, distinguishable from `TERMINATED`.
