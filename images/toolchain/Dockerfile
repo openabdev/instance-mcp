@@ -21,15 +21,25 @@
 
 FROM debian:bookworm-slim
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8
+LABEL org.opencontainers.image.source="https://github.com/openabdev/instance-mcp" \
+      org.opencontainers.image.title="oab-toolchain" \
+      org.opencontainers.image.description="Sandbox toolchain image for the sandbox adapter (docs/adr/sandbox-adapter.md)" \
+      org.opencontainers.image.base.name="docker.io/library/debian:bookworm-slim"
 
-# Base toolchain: python, node (NodeSource LTS), git, gh, and the small
-# utilities coding agents habitually need. One layer, cleaned.
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PIP_NO_CACHE_DIR=1
+
+# Base toolchain: python, node (NodeSource, keyring-verified apt source —
+# no pipe-to-bash), git, gh, and the small utilities coding agents
+# habitually need. One layer, cleaned.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+         > /etc/apt/sources.list.d/nodesource.list \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
          -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
