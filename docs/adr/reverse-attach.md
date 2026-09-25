@@ -53,10 +53,12 @@ why we start from the opposite premise.
 4. **The Mac chooses the tool profile per attach.** The Mac *is* the MCP server, so scoping is
    a per-connection tool list in `MCPServer` (`owner` = everything, `sandbox` = no `exec*`).
    No MCP parsing in a proxy.
-5. **The human decides which pod the Mac dials**, in Connect: pick a PTY session → "lend my Mac
-   to this agent" with profile + TTL → Connect calls `POST /attach {runtime, session, profile,
-   ttl}` on `oab-instance-mcp` with the human's credential → the Mac dials in. Explicit,
-   per-session, time-bounded, revocable, in the app where the human is already watching.
+5. **The human decides which pod the Mac dials**, from OpenAB Connect (Mac) **or OpenAB Remote
+   (iPhone)**: pick a PTY session → "lend my Mac to this agent" with profile + TTL → the client
+   calls `POST /attach {runtime, session, profile, ttl}` on `oab-instance-mcp` with the human's
+   credential → the Mac mints the attach secret, installs its verifier in the pod, and dials in.
+   The grant lives on the Mac: explicit, per-session, time-bounded, revocable from either
+   client, attributed to the human login; the granting device need not stay online.
 
 ### Prior art
 
@@ -84,7 +86,8 @@ sits on the Mac.
 **Paid**
 
 - New code on both sides: `WS /tools/attach` + loopback mux in openab-pty; WS client +
-  per-connection tool list + `POST /attach` in instance-mcp; a "lend my Mac" action in Connect.
+  per-connection tool list + `POST /attach` in instance-mcp; a "lend my Mac" action in Connect
+  and Remote.
   Both runtimes already have the building blocks (WS handling, verifier store, `MCPServer`).
 - "Who dials whom" needs Connect (or a later CP rendezvous) — the Mac cannot discover pods.
 - Retry/reconnect is the Mac's job. Pod recreated ⇒ verifier gone ⇒ Connect re-mints; the Mac

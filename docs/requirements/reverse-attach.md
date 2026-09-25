@@ -86,15 +86,65 @@ on the instance-mcp side.
    `tools/call` rejects anything else. No MCP parsing in a proxy. The `sandbox` profile
    excludes `exec`/`exec_start` (or gates them on Connect approval, below).
 
-### Who tells macmini which pod to dial — the human, in Connect
+### Who tells macmini which pod to dial — the human, in Connect or Remote
 
 Pods are ephemeral; macmini cannot be configured with them. Connect already lists both PTY
 sessions and Mac agents. The user selects a PTY session and chooses **"lend my Mac to this
-agent"** with a profile and a TTL; Connect (human credential, over the tailnet) calls a new
+agent"** with a profile and a TTL; the client (human credential, over the tailnet) calls a new
 admin endpoint on `oab-instance-mcp` — `POST /attach {runtime, session, profile, ttl}` — and
 macmini dials in. The grant is **explicit, per-session, time-bounded, revocable**, and made
 in the same app where the human watches the screen. This completes the closed loop: the human
 watches *and* authorises from one place.
+
+**Both OpenAB Connect (Mac) and OpenAB Remote (iPhone) can issue the grant.** The grant is a
+single authenticated HTTP call; everything that follows (dialling the pod, holding the socket,
+enforcing the TTL) happens on macmini. The granting device does not need to stay online — the
+phone can be put away after the tap. "I allow you to use my Mac mini for one hour" is exactly
+this call from the phone.
+
+#### How a grant works
+
+```
+  Connect / Remote                 oab-instance-mcp (macmini)                openab-pty pod
+  ────────────────                 ──────────────────────────                ──────────────
+  1. pick PTY session,
+     profile, TTL
+  2. POST /attach ───────────────► authenticate the human (existing
+     Authorization: Bearer <human>   AuthPolicy: tailnet login AND bearer,
+     {runtime, session,              see authn.md)
+      profile, ttl}
+                                  3. mint an attach secret; store
+                                     grant {session, profile, expires}
+                                  4. hand the sha256 verifier to the
+                                     pod's admin plane ────────────────────► store verifier for
+                                     (admin credential held by macmini)      that session only
+                                  5. dial wss://<pod>/tools/attach ────────► verify, accept
+                                     with the secret; serve MCP with
+                                     the profile's tool list
+  ◄── 202 {grant_id, expires} ────
+                                  6. TTL reached, or DELETE /attach/{id}
+                                     from any client ──► close socket,
+                                     drop secret ─────────────────────────► verifier deleted;
+                                                                             tools/list → "not attached"
+```
+
+Notes on the grant model:
+
+- **Grant lives on macmini**, not on the granting device. Connect and Remote are equal
+  clients of the same endpoint; a grant made from the phone can be revoked from the Mac and
+  vice versa (`GET /attach` lists active grants).
+- **Attribution.** The grant record carries the human login that authorised it (from
+  `Tailscale-User-Login`, see `authn.md`) and is written to `agent.log` with every tool call
+  made under it — "who lent the Mac to which session, for how long".
+- **Profile is part of the grant**, fixed for its lifetime. Widening (e.g. adding `exec`)
+  is a new grant, not an edit, so the audit trail stays honest.
+- **Renewal** is a new `POST /attach` for the same session before expiry; macmini rotates the
+  secret and keeps the socket. Nothing auto-renews.
+- **Mint path for the verifier (step 4)** reuses openab-pty's admin plane: macmini needs the
+  pod's admin credential for the one call that installs the verifier, the same credential
+  Connect already holds to create sessions. Alternative: Connect installs the verifier itself
+  and passes the secret to macmini in the `POST /attach` body — fewer credentials on macmini,
+  one more secret in flight through the client. Decide in 4b; the wire shape is the same.
 
 Alternative rendezvous (both sides dial `openab-cp`) is viable and aligns with the openab-pty
 → CP-runtime direction, but adds a third component; not needed for the first cut.
@@ -155,7 +205,7 @@ remainder of the grant TTL.
 |---|---|
 | `openabdev/openab-pty` | `WS /tools/attach` inbound endpoint with sha256-verifier auth (reuse admin-plane pattern); loopback MCP listener (`127.0.0.1` only, enforced) that multiplexes to the attached socket; admin op to mint/revoke an attach verifier for a session; deploy manifests unchanged (sidecar stays inbound-only) |
 | `oab-instance-mcp` (this repo) | reverse-attach client (WSS dial, reconnect, teardown when the pod disappears); per-connection **tool profiles** in `MCPServer` (`owner` = everything, `sandbox` = no `exec*`); admin endpoint `POST /attach` for Connect (human-credentialed, existing `AuthPolicy`); optional `exec` approval hop via Connect |
-| OpenAB Connect | "lend my Mac to this session" action → `POST /attach`; approval prompt for gated tools |
+| OpenAB Connect **and** OpenAB Remote | "lend my Mac to this session" action → `POST /attach`; list/revoke grants; approval prompt for gated tools. Both are clients of the same endpoint |
 
 ## Phasing
 
@@ -163,7 +213,7 @@ remainder of the grant TTL.
 |---|---|---|
 | 4a | **Protocol spike, no product code**: `websocat`/`socat` a reverse WS from macmini to a pod's loopback through the existing `tailscale serve`; prove MCP round-trips (`sys_info`, one streaming call) from a CLI pointed at the pod's loopback port | a tailnet-enrolled pod |
 | 4b | openab-pty `/tools/attach` + loopback mux; instance-mcp reverse-attach client + `sandbox` profile (no `exec*`); manual `POST /attach` via curl | 4a |
-| 4c | Connect "lend my Mac" UI + TTL + revoke; `exec` approval prompt | 4b + Connect |
+| 4c | Connect + Remote "lend my Mac" UI + TTL + revoke; `exec` approval prompt | 4b + Connect/Remote |
 
 ## Verification (4a, measurement discipline)
 
