@@ -31,6 +31,26 @@ everything after that is patching:
 All three require changing the sidecar from inbound-only to inbound+egress. Removing egress
 removes the whole class of problems.
 
+### Considered 2026-09-25 — ACL-scoped egress (viable, not chosen)
+
+A fourth variant deserves its own entry because it is *not* broken, only weaker: keep an
+egress path but pin it with a Tailscale ACL, `tag:oab-pty → tag:instance-mcp:<port>` only.
+This fixes the one flaw of variant 3 (a compromised agent reaching *any* tailnet node) and
+needs less new code than reverse attach. It was not chosen for these reasons:
+
+| Aspect | ACL-scoped egress | Reverse attach |
+|---|---|---|
+| How egress physically works | The sidecar is `--tun=userspace-networking` on both k8s and ECS (`deploy/`), so there is no tun device: egress exists only as a tailscaled SOCKS5/HTTP proxy that clients must *opt into*. Either the shell sets `HTTPS_PROXY` (per-client convention; token in the shell) or the runtime forwards loopback→SOCKS5 (variant 3 + ACL). Kernel mode would need `NET_ADMIN`+`/dev/net/tun`, which Fargate does not have | none; sidecar unchanged |
+| Granularity of trust | ACL is **per tag, per port**: every pod carrying the tag can reach every Mac carrying the other tag, forever, until the policy is edited (control-plane propagation). Per-session grant / TTL / revoke must be rebuilt as a server-side allowlist on instance-mcp | per session, TTL'd, revoked by deleting the verifier — native |
+| Dependency on Tailscale policy correctness | the security boundary now includes the ACL file: the default `src:["*"], dst:["*:*"]` rule (present on most tailnets) silently defeats the tag rule; ACL is port-level, and macmini's `tailscale serve :443` multiplexes other services (e.g. the OTA server), so granting `:443` grants all of them unless instance-mcp moves to a dedicated port | no ACL dependency; the pod initiates nothing, so an over-permissive ACL changes nothing |
+| Identity | tagged nodes carry no user login; instance-mcp could authenticate by `tailscale whois <src>` tag or an ACL `grants` app-capability (`openab.dev/cap/instance-mcp: [{profile}]`) — a clean pattern, but it moves tool-profile policy into the ACL file | macmini chooses the profile at dial time; nothing to look up |
+| New code | runtime loopback→SOCKS5 forwarder; instance-mcp allowlist + whois; ACL change + audit; sidecar flag | runtime `WS /tools/attach` + loopback mux; instance-mcp WS client + per-connection tool list |
+
+If reverse attach ever proves unworkable, ACL-scoped egress is the fallback — **with** the
+runtime forwarder (never `HTTPS_PROXY` in the shell), a dedicated instance-mcp port in the
+ACL, an audited policy with the default allow-all rule removed, and the per-session grant kept
+on the instance-mcp side.
+
 ## Decision — reverse attach
 
 ```
@@ -79,6 +99,45 @@ watches *and* authorises from one place.
 Alternative rendezvous (both sides dial `openab-cp`) is viable and aligns with the openab-pty
 → CP-runtime direction, but adds a third component; not needed for the first cut.
 
+## Prior art
+
+Reverse attach is the ordinary shape for "a device with hands joins a hub it cannot be dialled
+from": the side that owns the capability dials out, the hub multiplexes. Nothing here is new;
+the table records where each piece comes from and the one place the analogy inverts.
+
+### OpenClaw node ↔ gateway
+
+The closest match. OpenClaw's gateway is a WebSocket hub; companion nodes (macOS / iOS /
+Android apps) dial it, go through a device-pairing approval, advertise their capabilities
+(`system.run`, screen, camera, …), and the agent's `nodes` tool routes commands to a paired
+node over that socket.
+
+| OpenClaw | Reverse attach |
+|---|---|
+| gateway — WS server, the hub | openab-pty runtime `WS /tools/attach`, reached through the existing `tailscale serve` |
+| node (macOS app) dials the gateway | `oab-instance-mcp` on macmini dials the pod |
+| device pairing — a human approves the node | admin plane mints an attach verifier = "lend my Mac to this session" in Connect |
+| node advertises capabilities | macmini's `tools/list` per profile (`sandbox` omits `exec*`) |
+| agent's `nodes` tool routes to the node | runtime's loopback `127.0.0.1:<port>/mcp` muxes the CLI's MCP requests over the reverse socket |
+| node protocol is OpenClaw-specific | plain MCP JSON-RPC frames over WS; the mux needs only `id` |
+
+**Where the analogy inverts — and why "who dials whom" is the only hard part.** In OpenClaw
+the *hub* is long-lived with a fixed address and the *nodes* are ephemeral, so a node always
+knows where to dial. Here the hub (the pod) is ephemeral and the node (macmini) is the
+long-lived one. That is why macmini must be *told* which pod to dial (`POST /attach` from
+Connect) and why retry/reconnect ownership sits on macmini, the dialer: when a pod is
+recreated the verifier is gone with it, Connect re-mints, and macmini keeps redialling for the
+remainder of the grant TTL.
+
+### Other dial-out designs with the same reasoning
+
+| System | Pattern borrowed |
+|---|---|
+| `cloudflared` / ngrok tunnels | the origin dials the edge and never listens on a routable address; the edge multiplexes inbound requests over the tunnel — same "no inbound path, no egress needed on the other side" property, mirrored |
+| GitHub Actions self-hosted runners / ARC | the runner (the side with hands) dials out and long-polls for jobs; the control plane never dials the runner and needs no ACL onto it |
+| `ssh -R` reverse tunnel | a listener on the far side forwards back over a connection the near side initiated; the mux-by-connection idea |
+| openab-pty's own admin plane | the pod stores a `sha256:` verifier and never a usable secret; `/tools/attach` reuses the same verifier store and constant-time compare — see the "two invariants" in the openab-pty README |
+
 ## Threat model — what this does and does not stop
 
 | Threat | Result |
@@ -126,3 +185,13 @@ Alternative rendezvous (both sides dial `openab-cp`) is viable and aligns with t
   with absent, add gating when Connect has the prompt.
 - Framing on the reverse socket: raw MCP JSON-RPC frames over WS is simplest; the mux only
   needs a per-request correlation id it already has (`id`).
+- Behaviour on the loopback listener when **no Mac is attached**: proposed — `tools/list`
+  returns an empty list plus a single `instance_status` tool that answers "not attached", so
+  the agent can tell "no hands were lent" from "the endpoint is broken"; a `503` would read
+  as a fault.
+
+## Decision record
+
+The decision, the alternatives and their rejection reasons are recorded as an ADR in
+[`docs/adr/reverse-attach.md`](../adr/reverse-attach.md); this document holds the full design,
+threat model, phasing and prior art.
