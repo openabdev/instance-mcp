@@ -23,6 +23,19 @@ public struct MCPServer: Sendable {
         self.toolOrder = tools.map(\.name)
     }
 
+    /// Tools in declaration order. Used by `scoped(to:)`.
+    public var allTools: [any Tool] { toolOrder.compactMap { tools[$0] } }
+    public var toolNames: [String] { toolOrder }
+
+    /// Parse a JSON-RPC message that has already been decoded to a `JSONValue`
+    /// (the WebSocket path receives text, not `Data`).
+    public static func parse(_ value: JSONValue) -> Result<JSONRPCRequest, JSONRPCError> {
+        guard let data = try? JSONCoding.encoder.encode(value) else {
+            return .failure(.init(code: JSONRPCError.parseError, message: "unencodable value"))
+        }
+        return parse(data)
+    }
+
     /// Parse raw bytes into a request. Batches are rejected (removed in 2025-06-18).
     public static func parse(_ data: Data) -> Result<JSONRPCRequest, JSONRPCError> {
         do {

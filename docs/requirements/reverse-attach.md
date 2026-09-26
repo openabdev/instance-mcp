@@ -140,11 +140,11 @@ Notes on the grant model:
   is a new grant, not an edit, so the audit trail stays honest.
 - **Renewal** is a new `POST /attach` for the same session before expiry; macmini rotates the
   secret and keeps the socket. Nothing auto-renews.
-- **Mint path for the verifier (step 4)** reuses openab-pty's admin plane: macmini needs the
-  pod's admin credential for the one call that installs the verifier, the same credential
-  Connect already holds to create sessions. Alternative: Connect installs the verifier itself
-  and passes the secret to macmini in the `POST /attach` body — fewer credentials on macmini,
-  one more secret in flight through the client. Decide in 4b; the wire shape is the same.
+- **Mint path for the verifier (step 4)** — 4b implements **both**, exactly one per request:
+  `admin_credential` (macmini calls the pod's `POST /admin/sessions/{s}/tools-attach` with it,
+  uses it for that request only, keeps nothing; the runtime's TTL wins) or `secret` (the
+  client minted at the pod itself and hands macmini the result). Connect/Remote can pick
+  either; the grant record stores neither value.
 
 Alternative rendezvous (both sides dial `openab-cp`) is viable and aligns with the openab-pty
 → CP-runtime direction, but adds a third component; not needed for the first cut.
@@ -214,7 +214,7 @@ remainder of the grant TTL.
 | Phase | Deliverable | Depends on |
 |---|---|---|
 | 4a | ✅ **Done 2026-09-26** — see "4a results" below and [openab-pty#37](https://github.com/openabdev/openab-pty/issues/37). Protocol spike, no product code: `websocat` reverse WS from macmini into the pod's loopback; MCP round-trips (`sys_info`, `exec_start`/`exec_poll`) from a shell pointed at the pod's loopback port | a tailnet-enrolled pod |
-| 4b | openab-pty `/tools/attach` + loopback mux; instance-mcp reverse-attach client + `sandbox` profile (no `exec*`); manual `POST /attach` via curl | 4a |
+| 4b | ✅ **Done 2026-09-26** — openab-pty [#38](https://github.com/openabdev/openab-pty/pull/38) (`/tools/attach` + loopback mux + `CLIENT-CONTRACT.md` §9); this repo: `ReverseAttachClient`, `ToolProfile` (`owner` / `sandbox` = no `exec*`), `AttachManager` + `POST/GET /attach`, `DELETE /attach/{id}`. Verified end to end on macmini against the real runtime: mint via `admin_credential`, dial, sandbox `tools/list` without `exec`, forced `exec` refused, `sys_info` round trip, revoke → detach | 4a |
 | 4c | Connect + Remote "lend my Mac" UI + TTL + revoke; `exec` approval prompt | 4b + Connect/Remote |
 
 ## Verification (4a, measurement discipline)
