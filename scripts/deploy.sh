@@ -70,6 +70,11 @@ cat >"$APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
+  <!-- Reverse attach dials openab-pty pods over the tailnet as ws:// / http://: the hop is
+       WireGuard and the pod runtime holds no TLS key by design (openab-pty ADR). ATS would
+       otherwise refuse every non-loopback plaintext URL (NSURLErrorDomain -1022);
+       NSAllowsLocalNetworking covers only .local / link-local, not 100.64.0.0/10. -->
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
   <key>NSHumanReadableCopyright</key><string>OpenAB</string>
 </dict></plist>
 EOF
@@ -80,7 +85,7 @@ if [ -n "${KEYCHAIN:-}" ]; then
   [ -z "${KEYCHAIN_PASSWORD_FILE:-}" ] || security unlock-keychain -p "$(cat "$KEYCHAIN_PASSWORD_FILE")" "$KEYCHAIN"
   KC_ARGS=(--keychain "$KEYCHAIN")
 fi
-codesign --force --options runtime --timestamp=none "${KC_ARGS[@]}" --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+codesign --force --options runtime --timestamp=none ${KC_ARGS[@]+"${KC_ARGS[@]}"} --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP" && echo "signed: $(codesign -dv "$APP" 2>&1 | grep -E '^(Authority=Apple Dev|TeamIdentifier)' | tr '\n' ' ')"
 
 echo "--- LaunchAgent $LABEL ---"
