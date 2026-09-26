@@ -92,7 +92,16 @@ public actor AttachManager {
         case (let s?, nil) where !s.isEmpty:
             secret = s
         case (nil, let cred?) where !cred.isEmpty:
-            let minted = try await mint(req.runtime, req.session, cred, req.ttl)
+            let minted: (secret: String, expiresIn: TimeInterval)
+            do {
+                minted = try await mint(req.runtime, req.session, cred, req.ttl)
+            } catch let f as Failure {
+                throw f
+            } catch {
+                // Transport failure toward the runtime (unreachable, ATS, TLS…) is the
+                // runtime's side of the fence as far as the caller is concerned: 502.
+                throw Failure.mintFailed(status: 0, body: error.localizedDescription)
+            }
             secret = minted.secret
             // The runtime's TTL wins; ours is a request, theirs is the grant.
             expiresAt = min(expiresAt, Date().addingTimeInterval(minted.expiresIn))
