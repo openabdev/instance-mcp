@@ -15,20 +15,25 @@ public actor MCPHTTPEndpoint {
     private let auth: AuthPolicy
     private var sessions: Set<String> = []
     private let log: @Sendable (String) -> Void
+    /// Reverse-attach grants (`/attach`). nil ⇒ the routes answer 404.
+    private let attach: AttachManager?
 
-    public init(path: String = "/mcp", server: MCPServer, auth: AuthPolicy, log: @escaping @Sendable (String) -> Void = { _ in }) {
-        self.path = path; self.server = server; self.auth = auth; self.log = log
+    public init(path: String = "/mcp", server: MCPServer, auth: AuthPolicy, attach: AttachManager? = nil,
+                log: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.path = path; self.server = server; self.auth = auth; self.attach = attach; self.log = log
     }
 
     public func handle(_ req: HTTPRequest, remoteIsLoopback: Bool) async -> HTTPResponse {
         if req.path == "/healthz" { return .text(200, "ok\n") }
-        guard req.path == path else { return .text(404, "not found\n") }
+        let isAttach = attach != nil && (req.path == "/attach" || req.path.hasPrefix("/attach/"))
+        guard req.path == path || isAttach else { return .text(404, "not found\n") }
 
         switch auth.decide(headers: req.headers, remoteIsLoopback: remoteIsLoopback) {
         case .deny(let why):
-            log("deny \(req.method) \(path) from \(req.headers["x-forwarded-for"] ?? "local"): \(why)")
+            log("deny \(req.method) \(req.path) from \(req.headers["x-forwarded-for"] ?? "local"): \(why)")
             return .text(401, "unauthorized\n")
         case .allow(let who):
+            if isAttach { return await attachRoute(req, principal: who) }
             switch req.method {
             case "POST": return await post(req, principal: who)
             case "DELETE":
@@ -80,6 +85,65 @@ public actor MCPHTTPEndpoint {
         var resp = HTTPResponse.json(200, response)
         resp.headers.append(contentsOf: extraHeaders)
         return resp
+    }
+}
+
+// MARK: - /attach (reverse attach grants)
+
+extension MCPHTTPEndpoint {
+    /// `POST /attach` create · `GET /attach` list · `DELETE /attach/{id}` revoke.
+    /// Same `AuthPolicy` as `/mcp`: the human's credential, never the sandbox's.
+    private func attachRoute(_ req: HTTPRequest, principal: String) async -> HTTPResponse {
+        guard let attach else { return .text(404, "not found\n") }
+        await attach.sweep()
+        let sub = req.path.dropFirst("/attach".count)
+        switch (req.method, sub.isEmpty) {
+        case ("GET", true):
+            let grants = await attach.list()
+            return .json(200, JSONValue.object(["grants": .array(grants.map(\.json))]))
+        case ("POST", true):
+            guard req.header("content-type")?.lowercased().hasPrefix("application/json") == true,
+                  let body = try? JSONCoding.decoder.decode(JSONValue.self, from: req.body) else {
+                return .json(400, JSONValue.object(["error": "body must be a JSON object"]))
+            }
+            guard let runtimeStr = body["runtime"]?.stringValue, let runtime = URL(string: runtimeStr) else {
+                return .json(400, JSONValue.object(["error": "runtime (ws:// or wss:// URL) is required"]))
+            }
+            guard let session = body["session"]?.stringValue else {
+                return .json(400, JSONValue.object(["error": "session is required"]))
+            }
+            let profileStr = body["profile"]?.stringValue ?? ToolProfile.sandbox.rawValue
+            guard let profile = ToolProfile(rawValue: profileStr) else {
+                return .json(400, JSONValue.object(["error": .string("profile must be one of \(ToolProfile.allCases.map(\.rawValue))")]))
+            }
+            let ttl = TimeInterval(body["ttl_secs"]?.intValue ?? Int(AttachManager.defaultTTL))
+            let request = AttachManager.Request(runtime: runtime, session: session, profile: profile, ttl: ttl,
+                                                secret: body["secret"]?.stringValue,
+                                                adminCredential: body["admin_credential"]?.stringValue)
+            do {
+                let grant = try await attach.create(request, principal: principal)
+                return .json(202, grant.json)
+            } catch let f as AttachManager.Failure {
+                switch f {
+                case .badRequest: return .json(400, JSONValue.object(["error": .string(f.description)]))
+                case .mintFailed: return .json(502, JSONValue.object(["error": .string(f.description)]))
+                case .notFound: return .json(404, JSONValue.object(["error": .string(f.description)]))
+                }
+            } catch {
+                return .json(500, JSONValue.object(["error": .string("\(error)")]))
+            }
+        case ("DELETE", false):
+            let id = String(sub.dropFirst())   // strip "/"
+            guard await attach.get(id) != nil else { return .json(404, JSONValue.object(["error": "no such grant"])) }
+            await attach.revoke(id)
+            return .init(status: 204)
+        case ("GET", false):
+            let id = String(sub.dropFirst())
+            guard let g = await attach.get(id) else { return .json(404, JSONValue.object(["error": "no such grant"])) }
+            return .json(200, g.json)
+        default:
+            return .text(405, "method not allowed\n")
+        }
     }
 }
 

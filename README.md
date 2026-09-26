@@ -100,8 +100,49 @@ Configured checks are **AND**-combined: a request must pass every check that is 
 - `--insecure-local` — allow bare loopback requests with no Tailscale headers. Debugging only.
 - `/healthz` is unauthenticated and says only `ok`.
 
-Trust model: `exec` is a full shell as the logged-in user. This is "my CLI on my Mac". Before a
-sandboxed OAB bot gets this endpoint it needs a tool allowlist and its own token — not built.
+Trust model: `exec` is a full shell as the logged-in user. `/mcp` is "my CLI on my Mac". A
+sandboxed agent never gets `/mcp`; it gets a **reverse attach** with the `sandbox` profile (below).
+
+## Lending this Mac to a sandboxed agent (reverse attach)
+
+An agent in an `openab-pty` session cannot reach this Mac — the pod has no egress by design. So
+**this Mac dials the pod** and serves MCP over that socket with a narrowed tool list. Design:
+[`docs/adr/reverse-attach.md`](docs/adr/reverse-attach.md); wire contract: openab-pty
+`CLIENT-CONTRACT.md` §9.
+
+```
+  Connect / Remote ──POST /attach (your credential)──► this Mac ──WS dials in──► openab-pty pod
+                                                                                    └─► CLI in the session
+```
+
+```sh
+# "lend my Mac to session laptop for an hour, sandbox profile"; the Mac mints the attach
+# secret at the runtime with its admin credential (used once, not stored) and dials in.
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"runtime":"ws://100.111.174.31:8090","session":"laptop","profile":"sandbox",
+       "ttl_secs":3600,"admin_credential":"<openab-pty admin credential>"}' \
+  https://macmini.<tailnet>.ts.net:8444/attach
+# → 202 {"id":"…","state":"idle"|"attached",…}      GET /attach lists · DELETE /attach/{id} revokes
+```
+
+- **`/attach` uses the same `AuthPolicy` as `/mcp`** — the human's tailnet login + bearer. The grant
+  lives on this Mac; the phone can be put away after the tap.
+- **Profiles** are per grant and fixed for its life: `owner` = every tool; `sandbox` = no `exec*`
+  (the agent already has a shell in its sandbox). Under `sandbox`, `tools/list` omits them and a
+  forced `tools/call exec` is an *unknown tool* error. Widening is a new grant.
+- Either `secret` (already minted by the operator at the runtime) or `admin_credential` (the Mac
+  mints, TTL is the runtime's) — exactly one. A new grant for the same runtime+session replaces the
+  old one; that is renewal.
+- **Redial policy** (openab-pty §9.2): stop on `4001` expired · `4002` replaced · `4004` session
+  ended · `4010` revoked · handshake `401`; redial with backoff (1 s → 30 s) on `1000` / `4006` /
+  errors until the grant deadline. Nothing on the attached socket is trusted as identity — the
+  grant is the identity; `Tailscale-User-Login` there would be pod-supplied.
+- `--no-attach` disables the plane (`/attach` → 404).
+
+Verified 2026-09-26 end to end on macmini against the openab-pty runtime (PR #38): mint via
+`admin_credential`, dial, the session shell's `$OPENAB_TOOLS_MCP_URL` listed
+`sys_info screenshot mouse key osascript instance_status`, `exec` refused, `sys_info` answered,
+`DELETE /attach/{id}` detached.
 
 ## Build & test (on macmini; the laptop never compiles Swift)
 

@@ -4,7 +4,7 @@ import CoreGraphics
 import Foundation
 import InstanceMCPCore
 
-let version = "0.4.0"
+let version = "0.5.0"
 
 struct Options {
     var host = "127.0.0.1"
@@ -17,6 +17,7 @@ struct Options {
     var quiet = false
     var menuBar = false
     var publicURL: String? = nil
+    var attach = true
 }
 
 func usage() -> Never {
@@ -34,6 +35,9 @@ func usage() -> Never {
       --insecure-local  Allow unauthenticated requests that arrive on loopback *without*
                         Tailscale headers. For local debugging only.
 
+      --no-attach     Disable the reverse-attach plane (POST/GET /attach, DELETE /attach/{id}):
+                      the human-credentialed endpoint through which Connect / Remote lends this
+                      Mac to one openab-pty session (this Mac dials the pod; see the ADR).
       --menu-bar      Show a status item in the menu bar (permissions, activity, restart/quit).
       --public-url    The URL clients use (shown/copied from the menu); defaults to the local one.
 
@@ -64,6 +68,7 @@ while !args.isEmpty {
     case "--quiet": opts.quiet = true
     case "--menu-bar": opts.menuBar = true
     case "--public-url": opts.publicURL = next(a)
+    case "--no-attach": opts.attach = false
     case "--version": print(version); exit(0)
     case "-h", "--help": usage()
     default: fputs("unknown flag \(a)\n", stderr); usage()
@@ -112,7 +117,8 @@ let server = MCPServer(
         """,
     tools: [SysInfoTool(agentVersion: version), ExecTool(), ExecStartTool(), ExecPollTool(), ExecListTool(), ExecCancelTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()]
 )
-let endpoint = MCPHTTPEndpoint(path: opts.path, server: server, auth: auth, log: log)
+let attachManager: AttachManager? = opts.attach ? AttachManager(server: server, log: log) : nil
+let endpoint = MCPHTTPEndpoint(path: opts.path, server: server, auth: auth, attach: attachManager, log: log)
 
 // Must be a global: a `let` inside `do {}` is released after the block and the
 // listener's [weak self] handlers silently stop accepting connections.
@@ -124,6 +130,7 @@ do {
 }
 log("oab-instance-mcp \(version) starting on http://\(opts.host):\(opts.port)\(opts.path) " +
     "auth=[logins:\(opts.allowLogins.sorted().joined(separator: ",")) token:\(opts.token != nil) insecure-local:\(opts.insecureLocal)] " +
+    "attach=\(opts.attach) " +
     "screen_recording=\(CGPreflightScreenCaptureAccess()) accessibility=\(AXIsProcessTrusted())")
 http.start()
 
