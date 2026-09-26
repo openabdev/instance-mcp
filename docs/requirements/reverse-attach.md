@@ -241,6 +241,60 @@ Full log in [openab-pty#37](https://github.com/openabdev/openab-pty/issues/37). 
 | shell → any tailnet node, **host tailscaled running** | ❌ reached macmini/black/p1 and its own tailnet IP, as the node — see threat model row |
 | shell → any tailnet node, **host tailscaled stopped** (intended shape) | ✅ timeout to every target incl. its own tailnet IP; loopback runtime and CNI internet egress unchanged |
 
+### What was measured, as a picture
+
+The spike hop — the same shape 4b will implement, with `websocat` standing in for both ends:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SH as pod shell (uid 1000)<br/>curl, no *_PROXY
+    participant LB as pod loopback<br/>127.0.0.1:9101 → ws-l :9100<br/>(stand-in for mux + /tools/attach)
+    participant SC as tailscale sidecar<br/>userspace, inbound only
+    participant MM as macmini<br/>websocat dialer → instance-mcp :8796
+
+    MM->>SC: ws://100.111.174.31:9100 (WireGuard, direct LAN path via disco)
+    SC->>LB: forward to 127.0.0.1:9100 — no `serve` config needed
+    LB-->>MM: 101 Switching Protocols (attached)
+    SH->>LB: POST /mcp initialize / tools/list / sys_info
+    LB->>MM: frames over the reverse WS
+    MM-->>LB: results (macmini identity, 10 tools)
+    LB-->>SH: 200, 18–62 ms end to end
+    SH->>LB: exec_start → exec_poll ×2
+    LB-->>SH: running → exited exit 0
+    SH->>LB: wrong bearer
+    LB-->>SH: 401
+```
+
+The egress assertion, in the two node shapes that were measured. Only the right-hand one is
+the intended deployment:
+
+```mermaid
+flowchart LR
+    subgraph bad["❌ node IS a tailnet member (p1 as found)"]
+        direction TB
+        sh1["pod shell"] -->|"default route"| cni1["cni0 (host)"]
+        cni1 -->|"ip rule 5270 → table 52<br/>/32 per peer"| ts1["host tailscale0<br/>masquerade as p1"]
+        ts1 -->|"src = p1's tailnet IP"| peers1["macmini :22 ✔ banner<br/>black :22 ✔<br/>own tailnet IP :8090 ✔"]
+        sc1["sidecar<br/>inbound only"]:::idle
+    end
+
+    subgraph good["✅ sidecar is the ONLY tailscale (intended shape)"]
+        direction TB
+        sh2["pod shell"] -->|"default route"| cni2["cni0 (host)"]
+        cni2 -->|"no table 52, no tailscale0"| inet["internet via CNI<br/>github.com 200"]
+        cni2 -.->|"100.64.0.0/10"| x["timeout — no path<br/>macmini · black · p1 · own IP"]
+        sc2["sidecar<br/>inbound only"] -->|"forwards inbound to<br/>127.0.0.1:any"| lo2["pod loopback<br/>runtime :8090 · attach :9100"]
+        mm2["macmini dials in"] --> sc2
+    end
+
+    classDef idle fill:#eee,stroke:#999,color:#666,stroke-dasharray: 4 4
+    classDef leak fill:#fde8e8,stroke:#c0392b,color:#000
+    classDef ok fill:#e9f7ef,stroke:#2e8b57,color:#000
+    class ts1,peers1 leak
+    class x,lo2,sc2 ok
+```
+
 Carry-overs into 4b:
 
 - **Exactly one attach per session, enforced by the runtime.** Two dialers redialling the same session raced the loopback bind (`Address in use`), 418 failed attaches and a `TIME_WAIT` storm in minutes. Replace-with-close-code or refuse; never let the dialer spin.
