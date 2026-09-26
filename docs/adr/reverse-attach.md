@@ -92,6 +92,10 @@ sits on the Mac.
 - "Who dials whom" needs Connect (or a later CP rendezvous) — the Mac cannot discover pods.
 - Retry/reconnect is the Mac's job. Pod recreated ⇒ verifier gone ⇒ Connect re-mints; the Mac
   keeps redialling for the remainder of the grant TTL.
+- **Assumption that must hold in deployment: the k8s node is not itself a tailnet member.** If it
+  is, pods reach the whole tailnet through the node's tailscale routing regardless of the
+  sidecar (measured on p1, 2026-09-26; see the requirement doc's 4a results). Document it in
+  the openab-pty k8s how-to; opt-in egress `NetworkPolicy` if the node must run tailscaled.
 - Residual, by design: a compromised agent can call the tools it *was* granted. Every design
   that gives an agent hands carries this; here the hands are exactly as large, and last exactly
   as long, as the human chose.

@@ -198,6 +198,8 @@ remainder of the grant TTL.
 | compromised agent uses macmini's full shell via `exec` | **blocked by profile** — the `sandbox` profile omits `exec`, or requires a human tap in Connect (the human is already watching the screen) |
 | compromised agent calls the tools it *was* granted | **residual, by design** — giving an agent hands carries this in every design; the difference is the hands are exactly as large as the human chose, for as long as they chose |
 | macmini's attach credential leaks | attacker could serve a fake `/tools/attach`? No — the credential authenticates macmini *to the pod*; a leaked one lets an attacker impersonate macmini to that pod, not reach macmini. Mint per-attach, TTL'd, revoke by deleting the verifier |
+| **the k8s node itself is a tailnet member** (homelab k3s boxes often are) | **out of scope, must be documented as an assumption** — pods ride the node's tailscale routing (`ip rule … lookup 52` → `tailscale0`, masqueraded as the node) and reach every tailnet peer regardless of the sidecar. Measured on p1 in 4a: with the host's tailscaled running the shell reached macmini/black over their tailnet IPs; with it stopped, no path at all. Deployment rule: **no tailscaled on the node**; if unavoidable, an egress `NetworkPolicy` denying `100.64.0.0/10` + `fd7a:115c:a1e0::/48`. Fargate has no such path |
+| pod forges `Tailscale-User-Login` over the attached socket | **instance-mcp must not trust that header on `/tools/attach` traffic** — today `AuthPolicy` accepts it from a loopback peer because `tailscale serve` is assumed to be the peer; over reverse attach the loopback peer is the attach client and the header originates in the pod. Identity of a request on the attached socket is the *grant*, nothing in the request |
 
 ## Split of work
 
@@ -211,7 +213,7 @@ remainder of the grant TTL.
 
 | Phase | Deliverable | Depends on |
 |---|---|---|
-| 4a | **Protocol spike, no product code**: `websocat`/`socat` a reverse WS from macmini to a pod's loopback through the existing `tailscale serve`; prove MCP round-trips (`sys_info`, one streaming call) from a CLI pointed at the pod's loopback port | a tailnet-enrolled pod |
+| 4a | ✅ **Done 2026-09-26** — see "4a results" below and [openab-pty#37](https://github.com/openabdev/openab-pty/issues/37). Protocol spike, no product code: `websocat` reverse WS from macmini into the pod's loopback; MCP round-trips (`sys_info`, `exec_start`/`exec_poll`) from a shell pointed at the pod's loopback port | a tailnet-enrolled pod |
 | 4b | openab-pty `/tools/attach` + loopback mux; instance-mcp reverse-attach client + `sandbox` profile (no `exec*`); manual `POST /attach` via curl | 4a |
 | 4c | Connect + Remote "lend my Mac" UI + TTL + revoke; `exec` approval prompt | 4b + Connect/Remote |
 
@@ -224,6 +226,81 @@ remainder of the grant TTL.
   profile does **not** contain `exec`, and that a forced `tools/call exec` is rejected.
 - Confirm from inside the shell that **no** outbound tailnet path exists (`curl` to another
   tailnet node fails) — this is the property the design is buying.
+
+## 4a results (2026-09-26, real pod on p1, `oab-instance-mcp` 0.4.0 on macmini)
+
+Full log in [openab-pty#37](https://github.com/openabdev/openab-pty/issues/37). Stand-ins: `websocat -E -b ws-l:127.0.0.1:9100 tcp-l:127.0.0.1:9101` in the pod shell container (uid 1000) for `/tools/attach` + the loopback listener; `websocat -E -b ws://<pod>:9100 tcp:127.0.0.1:8796` on macmini as the reverse-attach client, into a bearer-only instance-mcp.
+
+| Check | Result |
+|---|---|
+| inbound WS to a pod loopback port through the userspace sidecar | 101 — this deployment has no `tailscale serve`; the sidecar forwards inbound tailnet TCP to the pod's loopback for **any** port, so `/tools/attach` needs no serve config |
+| from the shell, `*_PROXY` unset: `healthz`, `initialize`, `tools/list`, `sys_info` ×3 | all 200; 18–62 ms end to end (direct LAN path found by disco) |
+| job-style call: `exec_start` + `exec_poll` | `running` → `exited exit 0`, output intact |
+| wrong bearer | 401 |
+| `tools/list` under the `sandbox` profile has no `exec*` | not testable in 4a (profiles are 4b); today the list has `exec`, `exec_start`, `exec_poll`, `exec_list`, `exec_cancel` |
+| shell → any tailnet node, **host tailscaled running** | ❌ reached macmini/black/p1 and its own tailnet IP, as the node — see threat model row |
+| shell → any tailnet node, **host tailscaled stopped** (intended shape) | ✅ timeout to every target incl. its own tailnet IP; loopback runtime and CNI internet egress unchanged |
+
+### What was measured, as a picture
+
+The spike hop — the same shape 4b will implement, with `websocat` standing in for both ends:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SH as pod shell (uid 1000)<br/>curl, no *_PROXY
+    participant LB as pod loopback<br/>127.0.0.1:9101 → ws-l :9100<br/>(stand-in for mux + /tools/attach)
+    participant SC as tailscale sidecar<br/>userspace, inbound only
+    participant MM as macmini<br/>websocat dialer → instance-mcp :8796
+
+    MM->>SC: ws://100.111.174.31:9100 (WireGuard, direct LAN path via disco)
+    SC->>LB: forward to 127.0.0.1:9100 — no `serve` config needed
+    LB-->>MM: 101 Switching Protocols (attached)
+    SH->>LB: POST /mcp initialize / tools/list / sys_info
+    LB->>MM: frames over the reverse WS
+    MM-->>LB: results (macmini identity, 10 tools)
+    LB-->>SH: 200, 18–62 ms end to end
+    SH->>LB: exec_start → exec_poll ×2
+    LB-->>SH: running → exited exit 0
+    SH->>LB: wrong bearer
+    LB-->>SH: 401
+```
+
+The egress assertion, in the two node shapes that were measured. Only the right-hand one is
+the intended deployment:
+
+```mermaid
+flowchart LR
+    subgraph bad["❌ node IS a tailnet member (p1 as found)"]
+        direction TB
+        sh1["pod shell"] -->|"default route"| cni1["cni0 (host)"]
+        cni1 -->|"ip rule 5270 → table 52<br/>/32 per peer"| ts1["host tailscale0<br/>masquerade as p1"]
+        ts1 -->|"src = p1's tailnet IP"| peers1["macmini :22 ✔ banner<br/>black :22 ✔<br/>own tailnet IP :8090 ✔"]
+        sc1["sidecar<br/>inbound only"]:::idle
+    end
+
+    subgraph good["✅ sidecar is the ONLY tailscale (intended shape)"]
+        direction TB
+        sh2["pod shell"] -->|"default route"| cni2["cni0 (host)"]
+        cni2 -->|"no table 52, no tailscale0"| inet["internet via CNI<br/>github.com 200"]
+        cni2 -.->|"100.64.0.0/10"| x["timeout — no path<br/>macmini · black · p1 · own IP"]
+        sc2["sidecar<br/>inbound only"] -->|"forwards inbound to<br/>127.0.0.1:any"| lo2["pod loopback<br/>runtime :8090 · attach :9100"]
+        mm2["macmini dials in"] --> sc2
+    end
+
+    classDef idle fill:#eee,stroke:#999,color:#666,stroke-dasharray: 4 4
+    classDef leak fill:#fde8e8,stroke:#c0392b,color:#000
+    classDef ok fill:#e9f7ef,stroke:#2e8b57,color:#000
+    class ts1,peers1 leak
+    class x,lo2,sc2 ok
+```
+
+Carry-overs into 4b:
+
+- **Exactly one attach per session, enforced by the runtime.** Two dialers redialling the same session raced the loopback bind (`Address in use`), 418 failed attaches and a `TIME_WAIT` storm in minutes. Replace-with-close-code or refuse; never let the dialer spin.
+- **Dialer must tolerate the pod going dark.** For ~8 min p1 (host and pod) could not complete TLS to the Tailscale control plane while other LAN hosts could; the pod showed `offline` and a fresh dialer had no path. Redial for the grant TTL with backoff.
+- **A pod that is replaced needs a fresh `TS_AUTHKEY`.** The key stored in the k8s secret on p1 is already dead (`invalid key: API key does not exist`); the running sidecar lives on its persisted node state only. Reconnect-after-pod-restart therefore also depends on the operator's key hygiene, not just on Connect re-minting the verifier.
+- openab-pty runtime as container PID 1 does not reap orphans (`<defunct>` accumulate) — separate small fix there.
 
 ## Open questions
 
