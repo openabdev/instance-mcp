@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-27
 - **Related:** [openabdev/instance-mcp#15](https://github.com/openabdev/instance-mcp/issues/15) (FR + phased plan + arch diagrams), [`reverse-attach.md`](reverse-attach.md), [`sandbox-adapter.md`](sandbox-adapter.md)
+- **Review:** Two independent reviewers (fable/claude-fable-5.1, sol/gpt-5.6-sol) returned NEEDS_CHANGES; this revision incorporates their convergent findings. See PR discussion.
 
 ## Context
 
@@ -13,67 +14,105 @@ ScreenCaptureKit / CoreGraphics / Network. It lets a coding CLI drive a machine 
 The strategic target is shifting: **Linux is a first-class citizen, arguably the primary one.**
 Cheap Linux mini PCs and VMs are easy to acquire and scale horizontally; a Mac mini is
 expensive and comparatively rare. We should optimize for deploying many inexpensive Linux
-nodes, which favors a single static binary, trivial cross-compile (x86_64 + arm64), minimal
-runtime deps, and a strong Linux systems ecosystem.
+nodes, which favors a single self-contained binary, trivial cross-compile (x86_64 + arm64),
+and a strong Linux systems story.
 
-Analysis of the current codebase makes the port tractable:
+### On the code split (corrected framing)
 
-- **~62% is platform-agnostic** (pure Foundation in spirit): MCP server/dispatch, JSON-RPC,
-  HTTP/1.1, auth policy, reverse-attach, upstream MCP proxy, exec / async-exec / job registry.
-- **~640 lines across 5 files are platform-specific**: Input (CGEvent x27), Screenshot
-  (ScreenCaptureKit), SysInfo (CGDisplay/sysctl/TCC), osascript (AppleScript), plus the
-  Network.framework transport.
+An earlier draft leaned on "~62% of the code is platform-agnostic" to argue the port is
+"tractable." That framing is wrong and reviewers rightly flagged it. This is a **rewrite, not a
+port**: zero Swift lines carry over. "Platform-agnostic" describes the *concept*, not
+*reuse* — the ~62% (MCP dispatch, JSON-RPC, HTTP, auth policy, **reverse-attach**, upstream
+proxy, job registry) must be **re-implemented in Rust and re-earn every security property**.
+That is the *higher-risk* majority of the work. The genuinely de-riskable part ("shell out to
+grim/ydotool/proc") is the ~640-line platform-specific *minority*. Effort and risk must be
+sized against re-implementing and re-securing the core, not against the small platform shim.
 
 Target environment verified on `rpi1` (Raspberry Pi 5): aarch64, Debian 13 (trixie), labwc
-(Wayland) + lightdm, `grim`/`wlr-randr`/`scrot` already installed, `/dev/uinput` present
-(root-only), Swift not installed. Crucially, most platform-specific features can shell out to
-existing Linux CLIs (grim for capture, ydotool for input, /proc for sysinfo), which
-substantially de-risks a rewrite regardless of language.
+(Wayland) + lightdm, `grim`/`wlr-randr`/`scrot` installed, `/dev/uinput` present (root-only),
+Swift not installed. **Caveat: this is one hand-configured node.** It does not establish that
+cheap headless Linux VMs (often no compositor, no `WAYLAND_DISPLAY`, no seat) can run the
+graphical tools, nor that non-wlroots desktops (GNOME/KDE) work with grim/wlr-randr.
 
 ## Alternatives considered
 
-| Alternative | Why rejected |
+| Alternative | Why rejected / status |
 |---|---|
-| **Swift for Linux (keep one Swift codebase, reuse ~62%)** | Reuses the most code, but Swift-on-Linux has a weak systems ecosystem (uinput/Wayland need hand-rolled C FFI, few examples), heavier deployment (runtime/shared libs vs a static binary), and awkward cross-compile — all of which fight the Linux-first, scale-to-cheap-nodes goal. |
-| **Immediately rewrite everything (macOS included) in Rust, drop Swift now** | Cleanest end state (single codebase) but throws away the working Swift build up front and front-loads the largest effort, including re-binding newer macOS frameworks (ScreenCaptureKit) via objc2 before Linux even ships. Delays the strategic Linux target. |
-| **Two permanent codebases (Swift macOS + Rust Linux, no convergence)** | Ships Linux fast but locks in a permanent two-codebase sync trap: MCP protocol/behavior must be kept in lockstep by hand forever. |
-| **Node/TypeScript or Go rewrite** | Both deploy reasonably, but Rust wins on single static binary + no runtime, best-in-class Linux systems crates (evdev/uinput, wayland, sysinfo), and first-class cross-compile for x86_64 + arm64; it is also the strongest path to later re-unify macOS via FFI. |
+| **Swift for Linux (one Swift codebase, reuse the actual code)** | *Reconsidered, not dismissed.* The prior rejection ("weak Linux systems ecosystem: uinput/Wayland need C FFI") is largely neutralized by the shell-out plan (grim/ydotool/proc need no mature crates). Swift-on-Linux + shell-out would reuse real code (not a rewrite), avoid re-securing auth/reverse-attach, and ship Linux fastest. It remains a live contender pending the PoC; the case for Rust rests on deployment (static binary, cross-compile) and the long-term unify-on-Rust endgame, not on ecosystem alone. |
+| **Thin Rust/Go Linux host, keep the proven Swift core on macOS** | *Newly added.* Write only a small Linux binary implementing the platform tools + minimal MCP transport, sharing a conformance suite; leave the working Swift macOS build untouched. Ships Linux with far less re-secured surface. Weaker on the "single unified codebase" endgame; kept as the leading fallback if re-securing the full core in Rust proves too costly. |
+| **Immediately rewrite everything (macOS included) in Rust now** | Cleanest end state but throws away the working Swift build up front and front-loads the largest effort, including objc2/ScreenCaptureKit bindings before Linux ships. |
+| **Two permanent codebases (Swift macOS + Rust Linux, no convergence)** | Locks in a permanent sync trap. Note the transition period below still has this drift risk until Phase 3; the conformance suite is the mitigation. |
+| **Node/TypeScript or Go rewrite** | Deploy reasonably, but Rust wins on self-contained binary, Linux systems crates, and first-class x86_64+arm64 cross-compile, and is the strongest path to later unify macOS via FFI. |
 
 ## Decision
 
-**Rewrite in Rust, Linux-first, as one cross-platform core with per-OS backends; keep Swift as
-a transitional macOS backend until the Rust macOS backend reaches parity, then retire it.**
+**Rewrite in Rust, Linux-first, as one cross-platform core with per-OS backends behind a
+`PlatformBackend` trait (`#[cfg(target_os)]`); keep Swift as a transitional macOS backend until
+the Rust macOS backend reaches parity, then retire it — CONDITIONAL on the phase gates below.**
 
-1. **Phase 1 — Rust Linux, cross-platform by design.** Write the Rust MCP core (HTTP transport,
-   JSON-RPC, dispatch, auth + reverse-attach, exec / async-exec / job registry, upstream proxy)
-   and a solid Linux backend. All platform-specific behavior sits behind a `PlatformBackend`
-   trait selected via `#[cfg(target_os)]`; the core never assumes an OS. Linux backend:
-   screenshot via `grim`, input via `ydotool`/`/dev/uinput` (udev rule for non-root), sysinfo
-   via `/proc` + `/sys` + `wlr-randr`. Drop `osascript` (no Linux equivalent).
-2. **Phase 2 — add the macOS backend (FFI) in the same Rust codebase.** Implement the macOS
-   `PlatformBackend` with `objc2` / `core-graphics` (CGEvent input, ScreenCaptureKit capture,
-   sysctl/TCC sysinfo). This converges to a single unified Rust codebase.
-3. **Phase 3 — retire Swift.** The existing Swift macOS build keeps serving production during
-   Phase 1–2. Once the Rust macOS backend reaches parity and is validated, retire Swift.
+0. **Phase 0 — de-risk the two biggest unknowns before committing to the full buildout.**
+   - **macOS FFI spike:** prove `objc2`/`core-graphics` can do CGEvent input + one
+     ScreenCaptureKit frame + a TCC prompt, in a **signed + notarized + hardened-runtime**
+     build produced from CI. If this is impractical, the "unify on Rust / retire Swift"
+     endgame fails and we fall back to the thin-host alternative — decide before Phase 1.
+   - **Headless/seat spike:** prove screenshot/input work (or explicitly cannot) on a cheap
+     headless Linux VM with no pre-configured compositor — via a headless wlroots/virtual
+     compositor, or declare a "graphical seat required" provisioning contract.
+1. **Phase 1 — Rust Linux core, cross-platform by design.** Rust MCP core (HTTP transport,
+   JSON-RPC, dispatch, **auth + reverse-attach**, exec/async-exec/job registry, upstream
+   proxy) + Linux backend (screenshot `grim`, input `ydotool`/`/dev/uinput` + udev rule,
+   sysinfo `/proc`+`/sys`+`wlr-randr`; drop `osascript`). All platform specifics behind
+   `PlatformBackend`. **TLS: rustls** (pure-Rust, static-link, cross-compile friendly) —
+   chosen explicitly to honor the self-contained-binary goal; dependency set
+   (tokio/hyper/rustls/tungstenite/serde) audited with `cargo-deny`/`cargo-audit`.
+2. **Phase 2 — macOS backend (FFI) in the same codebase** (objc2/core-graphics: CGEvent,
+   ScreenCaptureKit, sysctl/TCC), only after Phase 0's spike proved it viable. Converges to a
+   single unified Rust codebase.
+3. **Phase 3 — retire Swift** once the Rust macOS backend meets the parity definition below.
 
-Rationale: don't discard the working Swift build up front; avoid the permanent two-codebase
-sync trap (one Rust core, only the thin backend forks by `#[cfg]`); Linux (the strategic
-primary target) ships soonest; macOS converges later without rewriting the core.
+### Security parity (reverse-attach) is a first-order requirement, not an afterthought
 
-Deployment target: one static binary per arch (x86_64 + arm64), scp-and-run, minimal deps.
+The core carries a bespoke auth/authz protocol (see `reverse-attach.md`): the Mac dials the
+pod over **WSS**, the pod stores only a **sha256 verifier**, the **shell never holds a
+credential**, and **tool profiles are scoped per connection**. Re-implementing this in Rust
+risks subtle divergence (constant-time verifier compare, TLS peer/cert handling, WS
+upgrade/origin checks, per-dispatch profile enforcement). Therefore:
+- A **versioned MCP + reverse-attach conformance / differential test suite** is the shared
+  anti-drift contract. Both the Swift and Rust implementations must pass it; it is the real
+  mechanism that prevents protocol drift during the Swift↔Rust transition.
+
+### "Self-contained binary" — honest dependency/deployment reality
+
+The Rust binary is self-contained for its own code + rustls, but it is **not** literally
+scp-and-run: it depends on external CLIs/daemons on graphical Linux nodes (`grim`, `ydotool`
++ `ydotoold`, `wlr-randr`), a **udev rule** for non-root `/dev/uinput`, and a live compositor
+seat. The deployment story must package these (image/cloud-init) and the binary must
+**probe capabilities + detect versions at startup** and degrade explicitly (e.g. headless
+node → graphical tools disabled, exec/sysinfo/MCP still available).
+
+### Validation gate (must pass before Status → Accepted)
+
+The PoC must exercise the **highest-risk** components, not just the easy ones:
+- (a) Rust MCP-over-HTTP handles `initialize` + tool dispatch.
+- (b) `sys_info` reads `/proc` + `wlr-randr`; `screenshot` shells out to `grim`.
+- (c) **auth + reverse-attach**: WSS dial-out, sha256 verifier with constant-time compare,
+  credential-never-in-shell, per-connection tool-profile enforcement — validated against the
+  conformance suite.
+- (d) Phase 0 spikes (macOS FFI signed/notarized; headless/seat) resolved.
 
 ### Prior art
 
 The "one core, per-OS backend behind a trait" shape is standard in Rust cross-platform tools
-(ripgrep, alacritty, wezterm) which isolate OS specifics behind `#[cfg(target_os)]` while
-sharing the bulk of the logic. Shelling out to `grim`/`ydotool` rather than binding Wayland
-directly mirrors how many Linux automation tools stay compositor-agnostic. Retiring an
-incumbent implementation only after a reimplementation reaches parity is the usual
-strangler-fig migration.
+(ripgrep, alacritty, wezterm) isolating OS specifics behind `#[cfg(target_os)]`. Shelling out
+to `grim`/`ydotool` mirrors compositor-agnostic Linux automation tools. Retiring an incumbent
+only after a reimplementation reaches parity is strangler-fig migration.
 
-## Validation
+## Open questions
 
-Phase 1 rests on three assumptions to confirm with a small PoC on `rpi1` before marking this
-ADR Accepted: (a) a Rust MCP-over-HTTP server handles `initialize` + tool dispatch; (b)
-`sys_info` reads /proc + `wlr-randr`; (c) `screenshot` shells out to `grim`. On success, update
-Status to Accepted and note "validated by PoC on rpi1".
+- Is full-core Rust worth re-securing auth/reverse-attach, vs the thin-host alternative that
+  keeps the proven Swift core? Decide with Phase 0 + PoC evidence.
+- Concrete definition of "parity" before retiring Swift: a per-tool conformance checklist +
+  the reverse-attach differential suite passing on both backends.
+- Wayland scope: wlroots-only, or add xdg-desktop-portal/PipeWire for GNOME/KDE?
+- Headless fleet: virtual compositor vs "graphical seat required" provisioning contract?
+- macOS release: cross-compile feasibility + CI runners for signing/notarization from Rust.
