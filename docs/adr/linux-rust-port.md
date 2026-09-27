@@ -60,7 +60,7 @@ the Rust macOS backend reaches parity, then retire it — CONDITIONAL on the pha
      compositor, or declare a "graphical seat required" provisioning contract.
 1. **Phase 1 — Rust Linux core, cross-platform by design.** Rust MCP core (HTTP transport,
    JSON-RPC, dispatch, **auth + reverse-attach**, exec/async-exec/job registry, upstream
-   proxy) + Linux backend (screenshot `grim`, input `ydotool`/`/dev/uinput` + udev rule,
+   proxy) + Linux backend (screenshot `grim`, input `wlrctl` (pointer+keyboard, Wayland virtual-pointer/keyboard -- no uinput; `wtype` alt for keys),
    sysinfo `/proc`+`/sys`+`wlr-randr`; drop `osascript`). All platform specifics behind
    `PlatformBackend`. **TLS: rustls** (pure-Rust, static-link, cross-compile friendly) —
    chosen explicitly to honor the self-contained-binary goal; dependency set
@@ -84,7 +84,7 @@ upgrade/origin checks, per-dispatch profile enforcement). Therefore:
 ### "Self-contained binary" — honest dependency/deployment reality
 
 The Rust binary is self-contained for its own code + rustls, but it is **not** literally
-scp-and-run: it depends on external CLIs/daemons on graphical Linux nodes (`grim`, `ydotool` plus `ydotoold`, `wlr-randr`), a **udev rule** for non-root `/dev/uinput`, and a live compositor
+scp-and-run: it depends on external CLIs/daemons on graphical Linux nodes (`grim`, `wlrctl`, `wlr-randr`) and a live compositor
 seat. The deployment story must package these (image/cloud-init) and the binary must
 **probe capabilities + detect versions at startup** and degrade explicitly (e.g. headless
 node → graphical tools disabled, exec/sysinfo/MCP still available).
@@ -93,7 +93,7 @@ node → graphical tools disabled, exec/sysinfo/MCP still available).
 
 The PoC must exercise the **highest-risk** components, not just the easy ones:
 - (a) Rust MCP-over-HTTP handles `initialize` + tool dispatch.
-- (b) `sys_info` reads `/proc` + `wlr-randr`; `screenshot` shells out to `grim`.
+- (b) `sys_info` reads `/proc` + `wlr-randr`; `screenshot` shells out to `grim`; input via `wlrctl` (pointer+keyboard). [Verified headless on rpi(aarch64)+x86_64 in #23.]
 - (c) **auth + reverse-attach**: WSS dial-out, sha256 verifier with constant-time compare,
   credential-never-in-shell, per-connection tool-profile enforcement — validated against the
   conformance suite.
