@@ -18,7 +18,7 @@ rm -f "$LOG" "$RA_LOG"
 PORT=18090 ADMIN=admin-secret CLOSES=1000,4010 SECRETS=pre=preminted-xyz LOG=$LOG \
   python3 mock_runtime.py > /tmp/mock-runtime.out 2>&1 &
 MOCK=$!
-BIND=127.0.0.1:8790 $BIN > "$RA_LOG" 2>&1 &
+BIND=127.0.0.1:8790 MCP_INSECURE_LOCAL=1 $BIN > "$RA_LOG" 2>&1 &
 RA=$!
 sleep 0.5
 trap 'kill $MOCK $RA 2>/dev/null' EXIT

@@ -442,8 +442,18 @@ fn tool_list(profile: &str) -> Value {
     });
     let screenshot = json!({
         "name": "screenshot",
-        "description": "Capture a screenshot of the current display via grim.",
-        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        "description": "Capture the node's Wayland display (via grim) and return it as an image. \
+                        Default PNG at scale 0.5 (960x540 for a 1080p output). jpeg only if the \
+                        node's grim was built with JPEG support (Debian's is not).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scale":   { "type": "number", "description": "output scale factor, default 0.5" },
+                "format":  { "type": "string", "enum": ["jpeg", "png"], "description": "default png" },
+                "quality": { "type": "integer", "description": "jpeg quality 1-100, default 80" }
+            },
+            "additionalProperties": false
+        }
     });
     let exec = json!({
         "name": "exec",
@@ -473,7 +483,7 @@ fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String
 
     match name {
         "sys_info" => Ok(tool_result(tool_sys_info())),
-        "screenshot" => Ok(tool_result(tool_screenshot())),
+        "screenshot" => tool_screenshot(&arguments),
         "exec" => {
             if profile == "sandbox" {
                 return Err((-32601, "exec not available in sandbox profile".to_string()));
@@ -539,32 +549,96 @@ fn tool_sys_info() -> Value {
     let hostname = read_file_trim("/proc/sys/kernel/hostname")
         .unwrap_or_else(|| "unknown".to_string());
 
+    // `host` / `displays` / `permissions` / `agent` are what OpenAB Connect's
+    // Screens pane reads; the rest is ours.
+    let display_ok = std::process::Command::new("grim")
+        .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into()))
+        .env("XDG_RUNTIME_DIR", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc_getuid() })))
+        .args(["-s", "0.05", "-t", "png", "-"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     json!({
+        "host": hostname,
+        "hostname": hostname,
         "os": pretty_name,
         "cpu_count": cpu_count,
         "mem_total": mem_total,
         "arch": arch,
-        "hostname": hostname
+        "displays": if display_ok { json!([{ "index": 0, "kind": "wayland" }]) } else { json!([]) },
+        "permissions": { "screen_recording": display_ok, "accessibility": false },
+        "agent": { "name": "instance-mcp-rpi", "version": "0.3.0", "platform": "linux" }
     })
 }
 
-fn tool_screenshot() -> Value {
-    let path = "/tmp/instance-mcp-shot.png";
-    let output = std::process::Command::new("grim").arg(path).output();
+fn tool_screenshot(arguments: &Value) -> Result<Value, (i64, String)> {
+    let scale = arguments.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let format = arguments
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("png")
+        .to_string();
+    let quality = arguments.get("quality").and_then(|v| v.as_i64()).unwrap_or(80);
+    if !(0.05..=2.0).contains(&scale) {
+        return Err((-32602, "scale must be in 0.05..=2.0".to_string()));
+    }
+    if format != "jpeg" && format != "png" {
+        return Err((-32602, "format must be jpeg or png".to_string()));
+    }
+    if !(1..=100).contains(&quality) {
+        return Err((-32602, "quality must be in 1..=100".to_string()));
+    }
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            json!({ "ok": true, "path": path, "bytes": bytes })
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            json!({ "ok": false, "path": path, "bytes": 0, "error": stderr.trim() })
-        }
-        Err(e) => {
-            json!({ "ok": false, "path": path, "bytes": 0, "error": e.to_string() })
+    let mut out = grim_command(scale, &format, quality).output().map_err(|e| (-32000, format!("grim: {e}")))?;
+    let mut format = format;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if format == "jpeg" && err.contains("jpeg support disabled") {
+            // Debian's grim is built without libjpeg; callers (Connect asks for
+            // jpeg) decode by content, so hand back PNG instead of failing.
+            format = "png".to_string();
+            out = grim_command(scale, &format, quality)
+                .output()
+                .map_err(|e| (-32000, format!("grim: {e}")))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return Err((-32000, format!("grim failed ({}): {err}", out.status)));
+            }
+        } else {
+            return Err((-32000, format!("grim failed ({}): {err}", out.status)));
         }
     }
+    let mime = if format == "png" { "image/png" } else { "image/jpeg" };
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &out.stdout);
+    Ok(json!({
+        "content": [ { "type": "image", "mimeType": mime, "data": data } ],
+        "structuredContent": { "bytes": out.stdout.len(), "scale": scale, "format": format }
+    }))
+}
+
+// grim needs WAYLAND_DISPLAY + XDG_RUNTIME_DIR; a systemd unit or an ssh-started
+// daemon does not have them. Default to the seat's usual values.
+fn grim_command(scale: f64, format: &str, quality: i64) -> std::process::Command {
+    let mut cmd = std::process::Command::new("grim");
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        cmd.env("WAYLAND_DISPLAY", "wayland-0");
+    }
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc_getuid() }));
+    }
+    cmd.arg("-s").arg(format!("{scale}")).arg("-t").arg(format);
+    if format == "jpeg" {
+        cmd.arg("-q").arg(quality.to_string());
+    }
+    cmd.arg("-"); // stdout
+    cmd
+}
+
+extern "C" {
+    fn getuid() -> u32;
+}
+unsafe fn libc_getuid() -> u32 {
+    getuid()
 }
 
 fn tool_exec(arguments: &Value) -> Value {
@@ -594,12 +668,118 @@ fn tool_exec(arguments: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// AuthPolicy — same shape as the Swift daemon: every configured check must pass.
+//   MCP_TOKEN / MCP_TOKEN_FILE   require `Authorization: Bearer` (constant-time compare)
+//   MCP_ALLOW_LOGIN              comma list matched against `Tailscale-User-Login`
+//                                (injected+overwritten by `tailscale serve`)
+//   MCP_INSECURE_LOCAL=1         allow bare loopback requests with nothing else set
+// ---------------------------------------------------------------------------
+
+struct AuthPolicy {
+    token: Option<String>,
+    allow_logins: Vec<String>,
+    insecure_local: bool,
+}
+
+impl AuthPolicy {
+    fn from_env() -> Result<AuthPolicy, String> {
+        let mut token = std::env::var("MCP_TOKEN").ok().filter(|s| !s.is_empty());
+        if token.is_none() {
+            if let Ok(path) = std::env::var("MCP_TOKEN_FILE") {
+                let t = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("MCP_TOKEN_FILE {path}: {e}"))?;
+                let t = t.trim().to_string();
+                if !t.is_empty() {
+                    token = Some(t);
+                }
+            }
+        }
+        let allow_logins: Vec<String> = std::env::var("MCP_ALLOW_LOGIN")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let insecure_local = matches!(
+            std::env::var("MCP_INSECURE_LOCAL").as_deref(),
+            Ok("1") | Ok("true")
+        );
+        if token.is_none() && allow_logins.is_empty() && !insecure_local {
+            return Err("refusing to start with no auth: set MCP_TOKEN / MCP_TOKEN_FILE and/or \
+                        MCP_ALLOW_LOGIN (or MCP_INSECURE_LOCAL=1 for loopback debugging)"
+                .to_string());
+        }
+        Ok(AuthPolicy { token, allow_logins, insecure_local })
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "token={} allow_login={:?} insecure_local={}",
+            self.token.is_some(),
+            self.allow_logins,
+            self.insecure_local
+        )
+    }
+
+    /// Ok(()) or Err(reason) — reason is logged, never sent to the client.
+    fn check(&self, req: &HttpRequest) -> Result<(), String> {
+        if let Some(expected) = &self.token {
+            let got = req
+                .authorization
+                .as_deref()
+                .and_then(|a| a.strip_prefix("Bearer "))
+                .unwrap_or("");
+            if !constant_time_eq(got.as_bytes(), expected.as_bytes()) {
+                return Err("bearer token missing or wrong".to_string());
+            }
+        }
+        if !self.allow_logins.is_empty() {
+            match req.ts_login.as_deref().map(|l| l.to_lowercase()) {
+                Some(l) if self.allow_logins.contains(&l) => {}
+                Some(l) => return Err(format!("login {l} not allowed")),
+                None => {
+                    if !(self.insecure_local && req.peer_is_loopback) {
+                        return Err("no Tailscale-User-Login header".to_string());
+                    }
+                }
+            }
+        }
+        if self.token.is_none() && self.allow_logins.is_empty() {
+            // insecure_local only
+            if !req.peer_is_loopback {
+                return Err("insecure-local: non-loopback peer".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ---------------------------------------------------------------------------
 // HTTP control server
 // ---------------------------------------------------------------------------
 
 fn main() {
     let bind = std::env::var("BIND").unwrap_or_else(|_| "127.0.0.1:8790".to_string());
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+    let policy: Arc<AuthPolicy> = match AuthPolicy::from_env() {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!("auth: {}", policy.describe());
 
     let listener = match TcpListener::bind(&bind) {
         Ok(l) => l,
@@ -614,8 +794,9 @@ fn main() {
         match stream {
             Ok(s) => {
                 let reg = registry.clone();
+                let pol = policy.clone();
                 thread::spawn(move || {
-                    if let Err(e) = handle_conn(s, reg) {
+                    if let Err(e) = handle_conn(s, reg, pol) {
                         eprintln!("connection error: {e}");
                     }
                 });
@@ -629,6 +810,9 @@ struct HttpRequest {
     method: String,
     path: String,
     body: String,
+    authorization: Option<String>,
+    ts_login: Option<String>,
+    peer_is_loopback: bool,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
@@ -662,15 +846,27 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
 
-    // Content-Length
+    // Headers we care about.
     let mut content_length: usize = 0;
+    let mut authorization = None;
+    let mut ts_login = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().unwrap_or(0);
+            let name = name.trim();
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse::<usize>().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("tailscale-user-login") {
+                ts_login = Some(value.to_string());
             }
         }
     }
+    let peer_is_loopback = stream
+        .peer_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false);
 
     // Read remaining body bytes.
     let mut body_bytes: Vec<u8> = buf[header_end..].to_vec();
@@ -685,7 +881,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        body,
+        authorization,
+        ts_login,
+        peer_is_loopback,
+    })
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -695,6 +898,46 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+fn write_raw(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &[(&str, &str)],
+) {
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in extra_headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+/// MCP Streamable HTTP (JSON response mode). Direct callers — a CLI or the
+/// OpenAB Connect Screens pane — get the full `owner` tool surface; the
+/// sandbox narrowing only applies to reverse-attached sessions.
+fn handle_mcp(stream: &mut TcpStream, body: &str) -> Result<(), String> {
+    let is_initialize = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|m| m == "initialize"))
+        .unwrap_or(false);
+    match answer(body, "owner") {
+        Some(reply) => {
+            let sid = format!("s-{}-{}", now_epoch_secs(), GRANT_COUNTER.fetch_add(1, Ordering::SeqCst));
+            let extra: Vec<(&str, &str)> = if is_initialize { vec![("Mcp-Session-Id", &sid)] } else { vec![] };
+            write_raw(stream, 200, "OK", "application/json", reply.as_bytes(), &extra);
+        }
+        None => write_raw(stream, 202, "Accepted", "text/plain", b"", &[]),
+    }
+    Ok(())
 }
 
 fn write_response(stream: &mut TcpStream, status: u16, reason: &str, body: &str) {
@@ -714,13 +957,38 @@ fn write_response(stream: &mut TcpStream, status: u16, reason: &str, body: &str)
     let _ = stream.flush();
 }
 
-fn handle_conn(mut stream: TcpStream, registry: Registry) -> Result<(), String> {
+fn handle_conn(
+    mut stream: TcpStream,
+    registry: Registry,
+    policy: Arc<AuthPolicy>,
+) -> Result<(), String> {
     let req = read_http_request(&mut stream)?;
 
     // Strip query string from path for routing.
     let route = req.path.split('?').next().unwrap_or("").to_string();
 
+    if req.method == "GET" && route == "/healthz" {
+        write_raw(&mut stream, 200, "OK", "text/plain", b"ok", &[]);
+        return Ok(());
+    }
+
+    if let Err(reason) = policy.check(&req) {
+        eprintln!("deny {} {} : {reason}", req.method, route);
+        write_response(&mut stream, 401, "Unauthorized", "{\"error\":\"unauthorized\"}");
+        return Ok(());
+    }
+
     match (req.method.as_str(), route.as_str()) {
+        ("POST", "/mcp") => handle_mcp(&mut stream, &req.body),
+        ("GET", "/mcp") => {
+            // No server-initiated stream in this PoC.
+            write_response(&mut stream, 405, "Method Not Allowed", "{\"error\":\"no SSE stream\"}");
+            Ok(())
+        }
+        ("DELETE", "/mcp") => {
+            write_raw(&mut stream, 204, "No Content", "text/plain", b"", &[]);
+            Ok(())
+        }
         ("POST", "/attach") => handle_attach(&mut stream, &req.body, registry),
         ("GET", "/attachments") => handle_attachments(&mut stream, registry),
         _ => {

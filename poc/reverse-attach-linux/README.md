@@ -41,10 +41,29 @@ bash smoke.sh                  # RESULT: 28 passed, 0 failed
 | sandbox | list = `sys_info,screenshot`; forced `exec` → error, not executed |
 | close handshake | client echoes the Close frame (was a bare EOF before the `socket.flush()` fix in `dial_loop`) |
 
+## Direct `/mcp` for OpenAB Connect's Screens pane (added 2026-09-28)
+
+The same binary now also serves MCP Streamable-HTTP (JSON mode) on `POST /mcp`, gated by an
+`AuthPolicy` with the Swift daemon's semantics — `MCP_TOKEN` / `MCP_TOKEN_FILE` (bearer,
+constant-time) AND `MCP_ALLOW_LOGIN` (matched against the `Tailscale-User-Login` header that
+`tailscale serve` injects); `MCP_INSECURE_LOCAL=1` for loopback debugging; refuses to start with
+nothing set. `/healthz` is open. `screenshot` returns MCP `image` content (grim → PNG; a `jpeg`
+request falls back to PNG because Debian's grim lacks libjpeg — Connect decodes by content).
+`sys_info` carries the `host` / `displays` / `permissions.screen_recording` / `agent.version`
+fields the Screens pane reads.
+
+On rpi1: systemd user unit `oab-instance-mcp.service` (BIND 127.0.0.1:8795, seat env
+`WAYLAND_DISPLAY=wayland-0`, linger on) + `tailscale serve --bg --https=8444 http://127.0.0.1:8795`
+→ `https://rpi1.tailb836bb.ts.net:8444/mcp`. Verified from the laptop: wrong token 401,
+initialize 200 with `Mcp-Session-Id`, `sys_info` host=rpi1 displays=1, Connect-shaped screenshot
+call (`display 0, scale 1, quality 0.6, format jpeg`) → 1920×1080 PNG in 1.35 s. Pi OS's labwc
+desktop keeps a 1920×1080 headless output alive with no monitor attached, so no sway needed.
+
 ## Not yet (vs the Swift implementation)
 
-- No `AuthPolicy` on `/attach` itself — binds loopback only; the tailnet-facing gate is the
-  `instance-mcp-poc` server from #15 and must be composed in.
+- `/mcp` has no real session table (an `Mcp-Session-Id` is issued but not checked) and no SSE stream.
+- Screenshot is PNG only (≈2 MB per 1080p frame); Connect polls at ≤2 FPS, so expect ~4 MB/s. A
+  JPEG encoder in-process (or a grim with libjpeg) is the fix.
 - `wss://` runtimes: dial works (rustls), mint over https does not.
 - Replacement semantics (new grant for same runtime+session replaces the old one) and
   `DELETE /attach/{id}` are not implemented; grants are append-only in memory.
