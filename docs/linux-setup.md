@@ -77,7 +77,28 @@ sudo tailscale up --hostname="$(hostname)" --accept-dns=false --accept-routes=fa
 with no URL at all, check `curl -4 -m 8 https://controlplane.tailscale.com/` — see
 [Gotchas](#gotchas).
 
-## 2. Build the daemon
+## 2. Get the daemon
+
+**Prebuilt (preferred).** Every `v*` release ships `oab-instance-mcp-VERSION-linux-arm64.tar.gz`
+and `-linux-amd64.tar.gz` (built and smoke-tested in CI on native runners) beside the macOS
+installer, with a `.sha256` each:
+
+```sh
+V=$(curl -fsSL https://api.github.com/repos/openabdev/instance-mcp/releases/latest | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"][1:])')
+A=$(dpkg --print-architecture)          # arm64 or amd64
+curl -fsSLO "https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-$A.tar.gz"
+curl -fsSLO "https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-$A.tar.gz.sha256"
+sha256sum -c "oab-instance-mcp-$V-linux-$A.tar.gz.sha256"
+tar xzf "oab-instance-mcp-$V-linux-$A.tar.gz" && cd "oab-instance-mcp-$V-linux-$A"
+./install-linux.sh            # does steps 3–5 below; --allow-login / --no-browser / --port
+```
+
+`install-linux.sh` is idempotent: it keeps an existing token, detects your Tailscale login,
+writes both user units, installs `@playwright/mcp` when `node`/`chromium` are present, enables
+linger and `tailscale serve`. If it did everything, skip to [Verify](#6-verify-from-another-tailnet-machine);
+steps 3–5 describe what it did.
+
+**From source** (needs Rust ≥ 1.85):
 
 ```sh
 git clone https://github.com/openabdev/instance-mcp ~/repo/instance-mcp
@@ -87,7 +108,8 @@ bash smoke.sh                      # 38 checks against the bundled mock runtime;
 ```
 
 `smoke.sh` runs the binary with `MCP_INSECURE_LOCAL=1` against `mock_runtime.py` on loopback.
-It does not need the desktop or the network, so run it first when something is off.
+It does not need the desktop or the network, so run it first when something is off. The same
+smoke runs in CI on amd64 and arm64 for every push.
 
 ## 3. Bearer token and the daemon unit
 
@@ -106,7 +128,7 @@ Description=oab-instance-mcp (Rust hands node: /mcp + /attach)
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/repo/instance-mcp/poc/reverse-attach-linux/target/release/reverse-attach
+ExecStart=%h/.local/oab-instance-mcp/oab-instance-mcp   # or …/target/release/reverse-attach from source
 Environment=BIND=127.0.0.1:8795
 Environment=MCP_TOKEN_FILE=%h/.config/oab-instance-mcp/token
 Environment=MCP_ALLOW_LOGIN=$LOGIN

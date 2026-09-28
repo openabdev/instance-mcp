@@ -184,6 +184,9 @@ Tagged releases publish a universal, Developer-ID-signed and Apple-notarized ins
 5. The same wizard remains available from the menu bar as **Set Up Permissions…**; use the menu
    item to copy the MCP URL and bearer token into OpenAB Connect/Remote.
 
+Linux hands nodes (Raspberry Pi and other Debian boxes) get `oab-instance-mcp-VERSION-linux-{arm64,amd64}.tar.gz`
+from the same release; see [`docs/linux-setup.md`](docs/linux-setup.md).
+
 The `.app.zip` beside the package is an advanced/manual artifact. After unzipping:
 
 ```sh
