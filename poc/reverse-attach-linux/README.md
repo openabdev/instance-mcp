@@ -74,6 +74,35 @@ pixels = screenshot pixels at scale 1); `key` → `wtype` (`type` unicode text, 
 config. Verified from the laptop: click into a field → `type` → screenshot shows the text →
 `press Escape` clears it, ~0.3 s per call.
 
+## Browser tools via `MCP_UPSTREAM` (added 2026-09-28)
+
+Same pattern as the Mac: `@playwright/mcp` runs beside the daemon on loopback and the daemon
+re-serves its tools under its own `tools/list`, filtered by the connection's profile.
+
+- `pw-mcp.sh` + systemd user unit `oab-pw-mcp.service`: `@playwright/mcp@0.0.82` pinned (same
+  as `poc/pw-mcp`), **headed** Chromium launched into the labwc seat (`WAYLAND_DISPLAY`,
+  `XDG_RUNTIME_DIR`, `DISPLAY=:0` for labwc's Xwayland), using the distro Chromium
+  (`--executable-path /usr/bin/chromium`, arm64-native, no Playwright download), persistent
+  profile, `--allowed-hosts` must include the `host:port` form or every request is 403.
+- Daemon: `MCP_UPSTREAM=browser=http://127.0.0.1:8794/mcp`. Mirrors Swift `UpstreamMCP`:
+  request/response Streamable HTTP, upstream `Mcp-Session-Id` held and re-established on
+  400/404 (the stale id must be dropped *before* re-`initialize`, or the upstream 404s that too),
+  SSE or JSON replies, `tools/list` cached 30 s (failures not cached), upstream down → its
+  tools absent. Local names win on collision.
+- Profile filter is the verbatim Swift `ToolProfile.sandboxBrowserTools` list (16 tools).
+  `owner` sees all 32; `sandbox` never sees `run_code_unsafe`, upload, pdf, network, raw
+  mouse-by-coordinate, dialogs, `browser_close`, or any new upstream tool.
+- Chromium managed policy `/etc/chromium/policies/managed/oab-instance-mcp.json` blocks
+  camera/mic/notification/geolocation prompts: YouTube triggered the xdg-desktop-portal
+  "Allow app to use the Camera?" dialog, which nothing but `mouse` could dismiss.
+
+Verified on rpi1: owner `/mcp` → 37 tools (5 local + 32 browser); after a pw-mcp restart the
+next call re-initializes and still lists 37. Lent to `kiro-1040` session `mac` (sandbox):
+22 tools = 5 local + 16 browser + `instance_status`; forced `browser_run_code_unsafe` →
+`-32601 unknown tool`; `browser_navigate` example.com 13 s (Pi 4 class, first page), then
+`browser_snapshot` → `heading "Example Domain"`, `link "Learn more"`. The Chromium window is
+on rpi1's desktop, so `screenshot` / Connect's Screens pane show what the agent is doing.
+
 ## Not yet (vs the Swift implementation)
 
 - `/mcp` has no real session table (an `Mcp-Session-Id` is issued but not checked) and no SSE stream.

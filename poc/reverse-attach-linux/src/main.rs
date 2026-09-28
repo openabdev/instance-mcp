@@ -261,6 +261,269 @@ fn mint(
     Ok((secret, expires_in))
 }
 
+
+// ---------------------------------------------------------------------------
+// Tiny blocking HTTP/1.1 client for http:// only (used for the upstream MCP)
+// ---------------------------------------------------------------------------
+
+struct HttpReply {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+fn http_post(url: &str, headers: &[(&str, &str)], body: &str, timeout: Duration) -> Result<HttpReply, String> {
+    let after_scheme = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("only http:// supported: {url}"))?;
+    let (authority, path) = match after_scheme.find('/') {
+        Some(idx) => (&after_scheme[..idx], &after_scheme[idx..]),
+        None => (after_scheme, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| "bad port".to_string())?),
+        None => (authority.to_string(), 80u16),
+    };
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    let addr = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve failed: {e}"))?
+        .next()
+        .ok_or_else(|| "no address resolved".to_string())?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("connect failed: {e}"))?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.write_all(request.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|e| format!("read failed: {e}"))?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, resp_body) = match text.find("\r\n\r\n") {
+        Some(i) => (&text[..i], &text[i + 4..]),
+        None => (text.as_str(), ""),
+    };
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let mut hdrs = Vec::new();
+    let mut chunked = false;
+    for l in lines {
+        if let Some((k, v)) = l.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("transfer-encoding") && v.to_lowercase().contains("chunked") {
+                chunked = true;
+            }
+            hdrs.push((k.trim().to_lowercase(), v.trim().to_string()));
+        }
+    }
+    let body = if chunked { dechunk(resp_body) } else { resp_body.to_string() };
+    Ok(HttpReply { status, headers: hdrs, body })
+}
+
+fn dechunk(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    loop {
+        let Some(nl) = rest.find("\r\n") else { break };
+        let size = usize::from_str_radix(rest[..nl].trim().split(';').next().unwrap_or("0"), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        let start = nl + 2;
+        let end = (start + size).min(rest.len());
+        out.push_str(&rest[start..end]);
+        rest = rest.get(end + 2..).unwrap_or("");
+    }
+    out
+}
+
+/// JSON body, or the first `data:` line of an SSE body.
+fn parse_mcp_body(body: &str) -> Result<Value, String> {
+    let t = body.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(t) {
+        return Ok(v);
+    }
+    for line in t.lines() {
+        if let Some(d) = line.strip_prefix("data:") {
+            if let Ok(v) = serde_json::from_str::<Value>(d.trim()) {
+                return Ok(v);
+            }
+        }
+    }
+    Err(format!("unparseable MCP body: {}", &t[..t.len().min(120)]))
+}
+
+// ---------------------------------------------------------------------------
+// Upstream MCP (e.g. @playwright/mcp on loopback), re-served under our tools/list.
+// Mirrors Swift `UpstreamMCP`: Streamable HTTP request/response, session id held
+// here and re-established on 400/404, tools cached 30 s, down → tools absent.
+// ---------------------------------------------------------------------------
+
+struct Upstream {
+    name: String,
+    url: String,
+    session_id: Mutex<Option<String>>,
+    cache: Mutex<Option<(std::time::Instant, Vec<Value>)>>,
+}
+
+impl Upstream {
+    /// MCP_UPSTREAM="browser=http://127.0.0.1:8794/mcp[,name=url...]"
+    fn from_env() -> Vec<Arc<Upstream>> {
+        std::env::var("MCP_UPSTREAM")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|e| e.trim().split_once('='))
+            .map(|(n, u)| {
+                Arc::new(Upstream {
+                    name: n.trim().to_string(),
+                    url: u.trim().to_string(),
+                    session_id: Mutex::new(None),
+                    cache: Mutex::new(None),
+                })
+            })
+            .collect()
+    }
+
+    fn post(&self, msg: &Value) -> Result<HttpReply, String> {
+        let sid = self.session_id.lock().ok().and_then(|g| g.clone());
+        let mut headers: Vec<(&str, &str)> = vec![
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+        ];
+        if let Some(s) = sid.as_deref() {
+            headers.push(("Mcp-Session-Id", s));
+        }
+        http_post(&self.url, &headers, &msg.to_string(), Duration::from_secs(90))
+    }
+
+    fn initialize(&self) -> Result<(), String> {
+        // Never send a stale id on initialize: the upstream answers 404 to it.
+        if let Ok(mut g) = self.session_id.lock() {
+            *g = None;
+        }
+        let r = self.post(&json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "instance-mcp-rpi", "version": "0.4.0"}}
+        }))?;
+        if !(200..300).contains(&r.status) {
+            return Err(format!("upstream {} initialize HTTP {}", self.name, r.status));
+        }
+        let sid = r.headers.iter().find(|(k, _)| k == "mcp-session-id").map(|(_, v)| v.clone());
+        if let Ok(mut g) = self.session_id.lock() {
+            *g = sid;
+        }
+        let _ = self.post(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        if let Ok(mut c) = self.cache.lock() {
+            *c = None;
+        }
+        Ok(())
+    }
+
+    fn rpc(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        if self.session_id.lock().ok().map(|g| g.is_none()).unwrap_or(true) {
+            self.initialize()?;
+        }
+        let mut msg = json!({"jsonrpc": "2.0", "id": 1, "method": method});
+        if let Some(p) = &params {
+            msg["params"] = p.clone();
+        }
+        let mut r = self.post(&msg)?;
+        if r.status == 404 || r.status == 400 {
+            // Upstream lost our session (restart). One re-init, one retry.
+            self.initialize()?;
+            r = self.post(&msg)?;
+        }
+        if !(200..300).contains(&r.status) {
+            return Err(format!("upstream {} HTTP {}: {}", self.name, r.status, &r.body[..r.body.len().min(120)]));
+        }
+        let v = parse_mcp_body(&r.body)?;
+        if let Some(e) = v.get("error") {
+            return Err(format!("upstream {} error: {e}", self.name));
+        }
+        Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        if let Ok(c) = self.cache.lock() {
+            if let Some((at, t)) = c.as_ref() {
+                if at.elapsed() < Duration::from_secs(30) {
+                    return t.clone();
+                }
+            }
+        }
+        let list = match self.rpc("tools/list", None) {
+            Ok(r) => r.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default(),
+            Err(e) => {
+                eprintln!("upstream {}: {e}", self.name);
+                // Do not cache a failure: the next tools/list retries immediately.
+                if let Ok(mut c) = self.cache.lock() {
+                    *c = None;
+                }
+                return Vec::new();
+            }
+        };
+        if let Ok(mut c) = self.cache.lock() {
+            *c = Some((std::time::Instant::now(), list.clone()));
+        }
+        list
+    }
+}
+
+/// Same list as Swift `ToolProfile.sandboxBrowserTools`: navigate / read / interact.
+/// Everything else from the upstream (run_code_unsafe, upload, pdf, network, raw
+/// mouse-by-coordinate, dialogs, close, and any new tool) is denied under sandbox.
+const SANDBOX_BROWSER_TOOLS: &[&str] = &[
+    "browser_click", "browser_console_messages", "browser_evaluate", "browser_fill_form",
+    "browser_find", "browser_hover", "browser_navigate", "browser_navigate_back",
+    "browser_press_key", "browser_resize", "browser_select_option", "browser_snapshot",
+    "browser_tabs", "browser_take_screenshot", "browser_type", "browser_wait_for",
+];
+
+fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
+    profile != "sandbox" || SANDBOX_BROWSER_TOOLS.contains(&name)
+}
+
+static UPSTREAMS: Mutex<Vec<Arc<Upstream>>> = Mutex::new(Vec::new());
+
+fn upstreams() -> Vec<Arc<Upstream>> {
+    UPSTREAMS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// Upstream tools visible to `profile`, excluding names that collide with local tools.
+fn upstream_tools_for(profile: &str, local_names: &[&str]) -> Vec<(Arc<Upstream>, Value)> {
+    let mut out = Vec::new();
+    for up in upstreams() {
+        for t in up.tools() {
+            let Some(name) = t.get("name").and_then(|n| n.as_str()) else { continue };
+            if local_names.contains(&name) || !upstream_tool_allowed(name, profile) {
+                continue;
+            }
+            out.push((up.clone(), t));
+        }
+    }
+    out
+}
+
+fn upstream_owning(name: &str, profile: &str) -> Option<Arc<Upstream>> {
+    if !upstream_tool_allowed(name, profile) {
+        return None;
+    }
+    upstreams().into_iter().find(|up| {
+        up.tools().iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket dial loop
 // ---------------------------------------------------------------------------
@@ -502,6 +765,8 @@ fn answer(text: &str, profile: &str) -> Option<String> {
     Some(response.to_string())
 }
 
+const LOCAL_TOOL_NAMES: &[&str] = &["sys_info", "screenshot", "bash", "mouse", "key"];
+
 fn tool_list(profile: &str) -> Value {
     let sys_info = json!({
         "name": "sys_info",
@@ -578,7 +843,11 @@ fn tool_list(profile: &str) -> Value {
     // Both profiles get everything: a lent node is only useful if the agent can act on it,
     // and the macOS sandbox profile already leaks a shell through `osascript`.
     let _ = profile;
-    json!([sys_info, screenshot, bash, mouse, key])
+    let mut tools = vec![sys_info, screenshot, bash, mouse, key];
+    for (_, t) in upstream_tools_for(profile, LOCAL_TOOL_NAMES) {
+        tools.push(t);
+    }
+    Value::Array(tools)
 }
 
 fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String)> {
@@ -597,7 +866,12 @@ fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String
         }
         "mouse" => tool_mouse(&arguments),
         "key" => tool_key(&arguments),
-        other => Err((-32601, format!("unknown tool: {other}"))),
+        other => match upstream_owning(other, profile) {
+            Some(up) => up
+                .rpc("tools/call", Some(json!({"name": other, "arguments": arguments})))
+                .map_err(|e| (-32000, e)),
+            None => Err((-32601, format!("unknown tool: {other}"))),
+        },
     }
 }
 
@@ -1213,6 +1487,13 @@ fn main() {
         }
     };
     eprintln!("auth: {}", policy.describe());
+    let ups = Upstream::from_env();
+    for u in &ups {
+        eprintln!("upstream {} = {}", u.name, u.url);
+    }
+    if let Ok(mut g) = UPSTREAMS.lock() {
+        *g = ups;
+    }
 
     let listener = match TcpListener::bind(&bind) {
         Ok(l) => l,
