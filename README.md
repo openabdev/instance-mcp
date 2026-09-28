@@ -60,6 +60,7 @@ you a shell; this exists for what SSH cannot reach.
 - `oab-instance-mcp` — this package. Swift, zero dependencies (Network.framework + ScreenCaptureKit).
 - Browser — `@playwright/mcp`, not ours. See [`poc/pw-mcp/README.md`](poc/pw-mcp/README.md).
 - Design notes: [`docs/requirements/connect-closed-loop.md`](docs/requirements/connect-closed-loop.md).
+- Linux hands node (Rust PoC, Raspberry Pi verified): [`docs/linux-setup.md`](docs/linux-setup.md).
 
 ## Tools
 
