@@ -62,6 +62,15 @@ initialize 200 with `Mcp-Session-Id`, `sys_info` host=rpi1 displays=1, Connect-s
 call (`display 0, scale 1, quality 0.6, format jpeg`) → 1920×1080 PNG in 1.35 s. Pi OS's labwc
 desktop keeps a 1920×1080 headless output alive with no monitor attached, so no sway needed.
 
+## `mouse` / `key` (added 2026-09-28, #26)
+
+`mouse` → `wlrctl pointer` (move / click / double_click / right_click / drag / scroll, display
+pixels = screenshot pixels at scale 1); `key` → `wtype` (`type` unicode text, `press` combos like
+`ctrl+shift+t`, `Return`, `Escape`; modifiers ctrl/shift/alt/super). Both run against the seat's
+`wayland-0`; labwc (wlroots) accepts the virtual-pointer and virtual-keyboard protocols with no
+config. Verified from the laptop: click into a field → `type` → screenshot shows the text →
+`press Escape` clears it, ~0.3 s per call.
+
 ## Not yet (vs the Swift implementation)
 
 - `/mcp` has no real session table (an `Mcp-Session-Id` is issued but not checked) and no SSE stream.
@@ -70,8 +79,8 @@ desktop keeps a 1920×1080 headless output alive with no monitor attached, so no
 - `wss://` runtimes: dial works (rustls), mint over https does not.
 - Replacement semantics (new grant for same runtime+session replaces the old one) and
   `DELETE /attach/{id}` are not implemented; grants are append-only in memory.
-- `screenshot` shells out to `grim` (needs a Wayland seat, see #23) and returns a path, not MCP
-  `image` content. No `mouse` / `key` (wlrctl, #26).
+- `mouse` uses wlrctl's virtual pointer, which is relative-only: every absolute move is "pin to
+  (-20000,-20000), then move (x,y)"; fine on one output, wrong with multiple outputs.
 - Real-runtime test against the p1 openab-pty pod is pending: rpi1 is **not on the tailnet**
   (no `tailscale` binary; `100.111.174.31:8090` times out) and the pod's `PTY_ADMIN_HASH` is a
   hash, so the admin credential must come from the operator.

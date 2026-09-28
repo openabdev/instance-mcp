@@ -80,7 +80,7 @@ if q=="pong":   print([e for e in log if e["ev"]=="pong"][0]["ok"])
 EOF
 }
 check "initialize → serverInfo instance-mcp-rpi" "[[ \$(py init) == instance-mcp-rpi ]]"
-check "owner tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash ]]"
+check "owner tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash,mouse,key ]]"
 check "sys_info hostname = $(hostname)" "[[ \$(py sys) == $(hostname) ]]"
 check "bash ran on node with cwd ~" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
 check "bash timeout → 137 + group killed" "[[ \$(py timeout) == 137,True ]]"
@@ -94,7 +94,7 @@ r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","sess
 echo "$r"
 for i in $(seq 1 20); do grep -q '"ev": "closed"' $LOG 2>/dev/null && break; sleep 0.5; done
 check "no mint call for secret path" "! grep -q '\"ev\": \"mint\"' $LOG"
-check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash ]]"
+check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash,mouse,key ]]"
 check "sandbox bash ran on node" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
 check "no sleep leaked after timeout" "! pgrep -f 'sleep 30' >/dev/null"
 check "close frame echoed (sandbox attach)" "grep -q '\"ev\": \"close_echo\"' $LOG"

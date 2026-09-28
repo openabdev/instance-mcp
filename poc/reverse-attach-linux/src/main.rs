@@ -473,10 +473,44 @@ fn tool_list(profile: &str) -> Value {
         }
     });
 
-    // Both profiles get bash: a lent node is only useful if the agent can act on it,
+    let mouse = json!({
+        "name": "mouse",
+        "description": "Pointer input on this node's Wayland display via wlrctl. Coordinates are display \
+                        pixels = screenshot pixels at scale 1 (1920x1080 here). Actions: move, click, \
+                        double_click, right_click, drag (x,y → to_x,to_y), scroll (dy/dx, positive = down/right).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["move", "click", "double_click", "right_click", "drag", "scroll"] },
+                "x": { "type": "number" }, "y": { "type": "number" },
+                "to_x": { "type": "number" }, "to_y": { "type": "number" },
+                "dx": { "type": "number" }, "dy": { "type": "number" }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    });
+    let key = json!({
+        "name": "key",
+        "description": "Keyboard input via wtype. `type`: send text (unicode, layout independent). `press`: \
+                        a key combo such as \"Return\", \"Tab\", \"ctrl+c\", \"ctrl+shift+t\", \"alt+F4\" \
+                        (xkb key names; modifiers ctrl/shift/alt/super).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["type", "press"] },
+                "text": { "type": "string" },
+                "combo": { "type": "string" }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    });
+
+    // Both profiles get everything: a lent node is only useful if the agent can act on it,
     // and the macOS sandbox profile already leaks a shell through `osascript`.
     let _ = profile;
-    json!([sys_info, screenshot, bash])
+    json!([sys_info, screenshot, bash, mouse, key])
 }
 
 fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String)> {
@@ -493,6 +527,8 @@ fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String
             let _ = profile;
             tool_bash(&arguments)
         }
+        "mouse" => tool_mouse(&arguments),
+        "key" => tool_key(&arguments),
         other => Err((-32601, format!("unknown tool: {other}"))),
     }
 }
@@ -751,6 +787,172 @@ fn tool_bash(arguments: &Value) -> Result<Value, (i64, String)> {
 
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
+}
+
+// ---------------------------------------------------------------------------
+// mouse / key — wlrctl (virtual pointer) + wtype (virtual keyboard) on the seat
+// ---------------------------------------------------------------------------
+
+fn seat_command(bin: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        cmd.env("WAYLAND_DISPLAY", "wayland-0");
+    }
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc_getuid() }));
+    }
+    cmd
+}
+
+fn run_seat(bin: &str, args: &[String]) -> Result<(), (i64, String)> {
+    let out = seat_command(bin)
+        .args(args)
+        .output()
+        .map_err(|e| (-32000, format!("{bin}: {e}")))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err((
+            -32000,
+            format!(
+                "{bin} {} failed ({}): {}",
+                args.join(" "),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ))
+    }
+}
+
+fn sv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| s.to_string()).collect()
+}
+
+/// wlrctl only knows relative motion: pin to the top-left corner, then move by (x, y).
+fn pointer_goto(x: f64, y: f64) -> Result<(), (i64, String)> {
+    run_seat("wlrctl", &sv(&["pointer", "move", "-20000", "-20000"]))?;
+    run_seat(
+        "wlrctl",
+        &sv(&["pointer", "move", &format!("{}", x.round() as i64), &format!("{}", y.round() as i64)]),
+    )
+}
+
+fn num(args: &Value, k: &str) -> Option<f64> {
+    args.get(k).and_then(|v| v.as_f64())
+}
+
+fn tool_mouse(arguments: &Value) -> Result<Value, (i64, String)> {
+    let action = arguments
+        .get("action")
+        .and_then(|a| a.as_str())
+        .ok_or_else(|| (-32602, "missing action".to_string()))?;
+    let xy = |a: &Value| -> Result<(f64, f64), (i64, String)> {
+        match (num(a, "x"), num(a, "y")) {
+            (Some(x), Some(y)) => Ok((x, y)),
+            _ => Err((-32602, format!("{action} needs x and y"))),
+        }
+    };
+    match action {
+        "move" => {
+            let (x, y) = xy(arguments)?;
+            pointer_goto(x, y)?;
+        }
+        "click" | "double_click" | "right_click" => {
+            if let (Some(x), Some(y)) = (num(arguments, "x"), num(arguments, "y")) {
+                pointer_goto(x, y)?;
+                thread::sleep(Duration::from_millis(40));
+            }
+            let button = if action == "right_click" { "right" } else { "left" };
+            run_seat("wlrctl", &sv(&["pointer", "click", button]))?;
+            if action == "double_click" {
+                thread::sleep(Duration::from_millis(60));
+                run_seat("wlrctl", &sv(&["pointer", "click", button]))?;
+            }
+        }
+        "drag" => {
+            let (x, y) = xy(arguments)?;
+            let (tx, ty) = match (num(arguments, "to_x"), num(arguments, "to_y")) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return Err((-32602, "drag needs to_x and to_y".to_string())),
+            };
+            pointer_goto(x, y)?;
+            run_seat("wlrctl", &sv(&["pointer", "press", "left"]))?;
+            thread::sleep(Duration::from_millis(60));
+            run_seat(
+                "wlrctl",
+                &sv(&["pointer", "move", &format!("{}", (tx - x).round() as i64), &format!("{}", (ty - y).round() as i64)]),
+            )?;
+            thread::sleep(Duration::from_millis(60));
+            run_seat("wlrctl", &sv(&["pointer", "release", "left"]))?;
+        }
+        "scroll" => {
+            if let (Some(x), Some(y)) = (num(arguments, "x"), num(arguments, "y")) {
+                pointer_goto(x, y)?;
+            }
+            let dy = num(arguments, "dy").unwrap_or(0.0);
+            let dx = num(arguments, "dx").unwrap_or(0.0);
+            run_seat("wlrctl", &sv(&["pointer", "scroll", &format!("{}", dy.round() as i64), &format!("{}", dx.round() as i64)]))?;
+        }
+        other => return Err((-32602, format!("unknown mouse action: {other}"))),
+    }
+    Ok(tool_result(json!({ "ok": true, "action": action })))
+}
+
+fn tool_key(arguments: &Value) -> Result<Value, (i64, String)> {
+    let action = arguments
+        .get("action")
+        .and_then(|a| a.as_str())
+        .ok_or_else(|| (-32602, "missing action".to_string()))?;
+    match action {
+        "type" => {
+            let text = arguments
+                .get("text")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| (-32602, "type needs text".to_string()))?;
+            // `--` so text starting with '-' is not parsed as a flag.
+            run_seat("wtype", &sv(&["--", text]))?;
+            Ok(tool_result(json!({ "ok": true, "action": "type", "chars": text.chars().count() })))
+        }
+        "press" => {
+            let combo = arguments
+                .get("combo")
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| (-32602, "press needs combo".to_string()))?;
+            let parts: Vec<&str> = combo.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+            let (mods, keys): (Vec<&str>, Vec<&str>) = parts.iter().partition(|p| {
+                matches!(p.to_ascii_lowercase().as_str(), "ctrl" | "control" | "shift" | "alt" | "super" | "cmd" | "meta" | "win" | "altgr")
+            });
+            if keys.len() != 1 {
+                return Err((-32602, format!("combo must have exactly one non-modifier key: {combo}")));
+            }
+            let norm = |m: &str| match m.to_ascii_lowercase().as_str() {
+                "control" => "ctrl".to_string(),
+                "cmd" | "meta" | "win" | "super" => "logo".to_string(),
+                x => x.to_string(),
+            };
+            let key = match keys[0] {
+                "Enter" | "enter" | "return" => "Return".to_string(),
+                "esc" | "Esc" => "Escape".to_string(),
+                "tab" => "Tab".to_string(),
+                "space" => "space".to_string(),
+                k => k.to_string(),
+            };
+            let mut args: Vec<String> = Vec::new();
+            for m in &mods {
+                args.push("-M".into());
+                args.push(norm(m));
+            }
+            args.push("-k".into());
+            args.push(key.clone());
+            for m in mods.iter().rev() {
+                args.push("-m".into());
+                args.push(norm(m));
+            }
+            run_seat("wtype", &args)?;
+            Ok(tool_result(json!({ "ok": true, "action": "press", "combo": combo })))
+        }
+        other => Err((-32602, format!("unknown key action: {other}"))),
+    }
 }
 
 // ---------------------------------------------------------------------------
