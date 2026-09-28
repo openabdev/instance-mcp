@@ -18,7 +18,7 @@ rm -f "$LOG" "$RA_LOG"
 PORT=18090 ADMIN=admin-secret CLOSES=1000,4010 SECRETS=pre=preminted-xyz LOG=$LOG \
   python3 mock_runtime.py > /tmp/mock-runtime.out 2>&1 &
 MOCK=$!
-BIND=127.0.0.1:8790 MCP_INSECURE_LOCAL=1 $BIN > "$RA_LOG" 2>&1 &
+BIND=127.0.0.1:8790 MCP_INSECURE_LOCAL=1 MCP_UPSTREAM=browser=http://127.0.0.1:1/mcp $BIN > "$RA_LOG" 2>&1 &
 RA=$!
 sleep 0.5
 trap 'kill $MOCK $RA 2>/dev/null' EXIT
@@ -36,6 +36,10 @@ r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","sess
 check "reject both secret+admin" "[[ '$r' == *'exactly one'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a"}')
 check "reject neither secret nor admin" "[[ '$r' == *'exactly one'* ]]"
+r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","profile":"Sandbox"}')
+check "reject unknown profile (no silent widening)" "[[ '$r' == *'profile must be owner or sandbox'* ]]"
+r=$($C -o /dev/null -w '%{http_code}' -X POST 127.0.0.1:8790/attach -H 'Content-Length: 99999999' -d '{}')
+check "oversized Content-Length refused before auth" "[[ '$r' == 000 || '$r' == 4* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","ttl_secs":0}')
 check "reject ttl 0" "[[ '$r' == *'ttl_secs'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","admin_credential":"WRONG"}')

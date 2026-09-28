@@ -333,8 +333,7 @@ fn http_post(url: &str, headers: &[(&str, &str)], body: &str, timeout: Duration)
 fn dechunk(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
-    loop {
-        let Some(nl) = rest.find("\r\n") else { break };
+    while let Some(nl) = rest.find("\r\n") {
         let size = usize::from_str_radix(rest[..nl].trim().split(';').next().unwrap_or("0"), 16).unwrap_or(0);
         if size == 0 {
             break;
@@ -1582,6 +1581,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .map(|a| a.ip().is_loopback())
         .unwrap_or(false);
 
+    // Cap the body before auth runs: an unauthenticated peer must not be able to
+    // make us buffer an arbitrary Content-Length. 4 MiB covers every real request
+    // (the largest is a tools/call with a screenshot-sized argument, far smaller).
+    const MAX_BODY: usize = 4 * 1024 * 1024;
+    if content_length > MAX_BODY {
+        return Err(format!("request body too large: {content_length} > {MAX_BODY}"));
+    }
+
     // Read remaining body bytes.
     let mut body_bytes: Vec<u8> = buf[header_end..].to_vec();
     while body_bytes.len() < content_length {
@@ -1801,6 +1808,10 @@ fn handle_attach(
     }
     if !valid_session(session) {
         return bad_request(stream, "session must match ^[a-z0-9-]{1,32}$");
+    }
+    // Only the two known profiles. Anything else must not silently widen to owner.
+    if profile != "owner" && profile != "sandbox" {
+        return bad_request(stream, "profile must be owner or sandbox");
     }
     if !(1..=86400).contains(&ttl_secs) {
         return bad_request(stream, "ttl_secs must be in 1..=86400");

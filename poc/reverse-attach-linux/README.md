@@ -27,7 +27,7 @@ mirroring the Swift `ReverseAttachClient` / `POST /attach` contract:
 
 Deps: `serde_json` + `tungstenite` (rustls). Sync std threads, no tokio. ~28 KB.
 
-## Verified on rpi1 (Debian 12, aarch64, Rust 1.98) — 2026-09-27
+## Verified on rpi1 (Debian 13, aarch64, Rust 1.98) — 2026-09-27
 
 ```sh
 cargo build --release          # 31 s cold, 2.2 MB binary
