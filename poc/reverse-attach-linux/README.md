@@ -5,10 +5,14 @@ Part of [#27](https://github.com/openabdev/instance-mcp/issues/27) (hands-node r
 self-contained binary that makes a Linux box a lendable "hands" node for an openab-pty session,
 mirroring the Swift `ReverseAttachClient` / `POST /attach` contract:
 
-- `POST /attach` `{runtime, session, profile, ttl_secs, secret | admin_credential}` → grant.
-  Exactly one of `secret` / `admin_credential`; the latter mints at the runtime's
-  `POST /admin/sessions/{session}/tools-attach` with `{"ttl_secs": N}` (ws:// runtimes only in
-  this PoC) and forwards the TTL end to end (#25 semantics).
+- `POST /attach` `{runtime, session, profile, ttl_secs, secret | admin_credential}` → HTTP 202
+  with the same grant shape Connect decodes: `{id, runtime, session, profile, principal, state,
+  expires_in_secs}`. Exactly one credential; the admin path mints at the runtime with
+  `{"ttl_secs": N}` (ws:// only in this PoC) and forwards TTL end to end.
+- `GET /attach` → `{grants:[…]}`; `GET /attach/{id}` → one grant; `DELETE /attach/{id}` →
+  204 and promptly cancels the dial/socket. New grant for the same `(runtime, session)` replaces
+  the old one. States match Swift: `idle / dialing / attached / redialing / ended` plus optional
+  `ended` reason (`revoked`, `handshake_rejected_401`, `deadline`, …).
 - Dial loop: `GET ws://…/tools/attach/{session}` with `Authorization: Bearer <secret>`, redial
   1 s → 30 s backoff until the grant deadline. Disposition per openab-pty §9.2: close `4001`
   expired / `4002` replaced / `4004` session ended / `4010` revoked and handshake non-2xx/429/5xx
@@ -20,8 +24,6 @@ mirroring the Swift `ReverseAttachClient` / `POST /attach` contract:
   profile already hands out a shell through `osascript`'s `do shell script`). `bash` = `bash -c`
   as the daemon user with `cwd` (`~` expands), `timeout_secs` (default 60, max 600; the whole
   process group is killed → exit 137, `timed_out=true`), `max_output_bytes` per stream (≤1 MiB).
-- `GET /attachments` lists grants with live state (`dialing` / `attached` /
-  `stopped(revoked)` / `stopped(handshakeRejected(401))` / `ended(deadline)` …).
 
 Deps: `serde_json` + `tungstenite` (rustls). Sync std threads, no tokio. ~28 KB.
 
@@ -29,7 +31,7 @@ Deps: `serde_json` + `tungstenite` (rustls). Sync std threads, no tokio. ~28 KB.
 
 ```sh
 cargo build --release          # 31 s cold, 2.2 MB binary
-bash smoke.sh                  # RESULT: 28 passed, 0 failed
+bash smoke.sh                  # RESULT: 36 passed, 0 failed
 ```
 
 `smoke.sh` runs the binary against `mock_runtime.py` (stdlib-only mock openab-pty: mint endpoint
@@ -39,7 +41,8 @@ bash smoke.sh                  # RESULT: 28 passed, 0 failed
 |---|---|
 | validation | non-ws runtime, bad session, both/neither credential, ttl 0, wrong admin → `400 mint failed: mint HTTP 401`, 404 route |
 | mint path | `ttl_secs=60` seen by the runtime's mint endpoint; `expires_in_secs=60` in the grant |
-| redial / stop | close `1000` → redialed after 1 s; close `4010` → `stopped(revoked)`; wrong secret → handshake 401 → `stopped(handshakeRejected(401))` with **exactly one** attempt; unreachable runtime → backoff → `ended(deadline)` |
+| control contract | `POST /attach` 202 with every Connect-required grant field; `GET /attach` wrapper; `GET /attach/{id}`; `DELETE` 204 + removal; principal and dynamic expiry |
+| redial / stop | close `1000` → redialed after 1 s; close `4010` → `state=ended, ended=revoked`; wrong secret → `ended=handshake_rejected_401` with exactly one attempt; unreachable runtime → `ended=deadline` |
 | MCP | `serverInfo.name=instance-mcp-rpi`; owner list = `sys_info,screenshot,exec`; `sys_info.hostname=rpi1`; `exec` ran on the node; unknown tool / method → `-32601`; notification silent; ping → pong |
 | sandbox | list = `sys_info,screenshot`; forced `exec` → error, not executed |
 | close handshake | client echoes the Close frame (was a bare EOF before the `socket.flush()` fix in `dial_loop`) |
@@ -77,8 +80,6 @@ config. Verified from the laptop: click into a field → `type` → screenshot s
 - Screenshot is PNG only (≈2 MB per 1080p frame); Connect polls at ≤2 FPS, so expect ~4 MB/s. A
   JPEG encoder in-process (or a grim with libjpeg) is the fix.
 - `wss://` runtimes: dial works (rustls), mint over https does not.
-- Replacement semantics (new grant for same runtime+session replaces the old one) and
-  `DELETE /attach/{id}` are not implemented; grants are append-only in memory.
 - `mouse` uses wlrctl's virtual pointer, which is relative-only: every absolute move is "pin to
   (-20000,-20000), then move (x,y)"; fine on one output, wrong with multiple outputs.
 - Real-runtime test against the p1 openab-pty pod is pending: rpi1 is **not on the tailnet**
