@@ -15,8 +15,11 @@ mirroring the Swift `ReverseAttachClient` / `POST /attach` contract:
   → **stop**; `1000` / `4006` / other / 2xx / 429 / 5xx → **redial**. Same table the
   `reverse-attach-conformance` suite (#24) checks 23/23 against the Swift oracle.
 - MCP over the socket: `initialize`, `tools/list`, `tools/call`; notifications get no reply;
-  ping → pong. Profiles: `owner` = `sys_info` `screenshot` `exec`; `sandbox` = no `exec`
-  (`tools/list` omits it and a forced call is an error).
+  ping → pong. Tools: `sys_info`, `screenshot`, `bash` — in **both** profiles (decision
+  2026-09-28: a lent node is only useful if the agent can act on it, and the macOS sandbox
+  profile already hands out a shell through `osascript`'s `do shell script`). `bash` = `bash -c`
+  as the daemon user with `cwd` (`~` expands), `timeout_secs` (default 60, max 600; the whole
+  process group is killed → exit 137, `timed_out=true`), `max_output_bytes` per stream (≤1 MiB).
 - `GET /attachments` lists grants with live state (`dialing` / `attached` /
   `stopped(revoked)` / `stopped(handshakeRejected(401))` / `ended(deadline)` …).
 

@@ -65,20 +65,25 @@ log=[json.loads(l) for l in open(sys.argv[1])]
 rpcs=[e for e in log if e["ev"]=="rpc"]
 def find(m,n=0):
     return [e for e in rpcs if e["method"]==m][n]["reply"]
+def byid(i):
+    return [e["reply"] for e in rpcs if e["reply"].get("id")==i][0]
 q=sys.argv[2]
 if q=="init":   print(find("initialize")["result"]["serverInfo"]["name"])
 if q=="tools":  print(",".join(t["name"] for t in find("tools/list")["result"]["tools"]))
-if q=="sys":    print(find("tools/call",0)["result"]["structuredContent"]["hostname"])
-if q=="exec":   print(find("tools/call",1)["result"]["structuredContent"]["stdout"].strip())
-if q=="unk":    print(find("tools/call",2)["error"]["code"], find("tools/call",2)["error"]["message"])
+if q=="sys":    print(byid(3)["result"]["structuredContent"]["hostname"])
+if q=="exec":   print(byid(4)["result"]["structuredContent"]["stdout"].strip().replace("\n"," "))
+if q=="timeout":
+    sc=byid(7)["result"]["structuredContent"]; print(f'{sc["exit_code"]},{sc["timed_out"] and sc["duration_ms"]<3000}')
+if q=="unk":    print(byid(5)["error"]["code"], byid(5)["error"]["message"])
 if q=="bogus":  print(find("bogus/method")["error"]["code"])
 if q=="pong":   print([e for e in log if e["ev"]=="pong"][0]["ok"])
 EOF
 }
 check "initialize → serverInfo instance-mcp-rpi" "[[ \$(py init) == instance-mcp-rpi ]]"
-check "owner tools/list = sys_info,screenshot,exec" "[[ \$(py tools) == sys_info,screenshot,exec ]]"
+check "owner tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash ]]"
 check "sys_info hostname = $(hostname)" "[[ \$(py sys) == $(hostname) ]]"
-check "exec ran on node" "[[ \$(py exec) == hands-node-$(hostname) ]]"
+check "bash ran on node with cwd ~" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
+check "bash timeout → 137 + group killed" "[[ \$(py timeout) == 137,True ]]"
 check "unknown tool → -32601" "[[ \$(py unk) == -32601* ]]"
 check "unknown method → -32601" "[[ \$(py bogus) == -32601 ]]"
 check "ping → pong" "[[ \$(py pong) == True ]]"
@@ -89,8 +94,9 @@ r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","sess
 echo "$r"
 for i in $(seq 1 20); do grep -q '"ev": "closed"' $LOG 2>/dev/null && break; sleep 0.5; done
 check "no mint call for secret path" "! grep -q '\"ev\": \"mint\"' $LOG"
-check "sandbox tools/list = sys_info,screenshot" "[[ \$(py tools) == sys_info,screenshot ]]"
-check "sandbox exec → error (not run)" "grep -q 'exec not available in sandbox' $LOG"
+check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash ]]"
+check "sandbox bash ran on node" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
+check "no sleep leaked after timeout" "! pgrep -f 'sleep 30' >/dev/null"
 check "close frame echoed (sandbox attach)" "grep -q '\"ev\": \"close_echo\"' $LOG"
 st=$($C 127.0.0.1:8790/attachments); echo "$st"
 check "sandbox grant stopped(revoked) (CLOSES tail=4010)" "[[ \$(echo '$st' | state_of pre) == 'stopped(revoked)' ]]"

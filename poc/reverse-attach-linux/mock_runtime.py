@@ -145,7 +145,8 @@ def drive_mcp(conn, session, nth):
     r = rpc(conn, 2, "tools/list")
     assert r["id"] == 2, "notification produced a reply"
     rpc(conn, 3, "tools/call", {"name": "sys_info", "arguments": {}})
-    rpc(conn, 4, "tools/call", {"name": "exec", "arguments": {"command": "echo hands-node-$(hostname)"}})
+    rpc(conn, 4, "tools/call", {"name": "bash", "arguments": {"command": "echo hands-node-$(hostname); pwd", "cwd": "~"}})
+    rpc(conn, 7, "tools/call", {"name": "bash", "arguments": {"command": "sleep 30 & sleep 30", "timeout_secs": 1}})
     rpc(conn, 5, "tools/call", {"name": "nope", "arguments": {}})
     rpc(conn, 6, "bogus/method")
     ws_send(conn, 0x9, b"ping")
