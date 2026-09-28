@@ -11,14 +11,33 @@ shell as the user running the daemon.
 
 ## What you end up with
 
-```
-                    tailscale serve :8444 (TLS + Tailscale-User-Login)
-callers ──────────► 127.0.0.1:8795  oab-instance-mcp.service   (reverse-attach binary)
-                          │   /mcp  /attach  /healthz
-                          │   sys_info  screenshot  bash  mouse  key
-                          └── MCP_UPSTREAM browser= ──► 127.0.0.1:8794  oab-pw-mcp.service
-                                                          @playwright/mcp → headed Chromium
-                    all of it inside the desktop seat: WAYLAND_DISPLAY=wayland-0
+```mermaid
+flowchart LR
+    subgraph callers["Callers (anywhere on the tailnet)"]
+        cli["Coding CLI / agent"]
+        connect["OpenAB Connect<br/>Screens pane"]
+        pod["openab-pty pod<br/>(reverse attach)"]
+    end
+
+    subgraph node["Linux hands node — one box"]
+        ts["tailscale serve :8444<br/>TLS + injects Tailscale-User-Login"]
+        subgraph seat["Desktop seat · systemd --user · WAYLAND_DISPLAY=wayland-0"]
+            mcp["<b>oab-instance-mcp.service</b><br/>reverse-attach binary · 127.0.0.1:8795<br/>auth = allow-login <b>AND</b> bearer<br/>/mcp · /attach · /healthz<br/>sys_info · screenshot · bash · mouse · key"]
+            pw["<b>oab-pw-mcp.service</b><br/>@playwright/mcp · 127.0.0.1:8794<br/>headed distro Chromium, persistent profile"]
+        end
+        subgraph hands["What the tools touch"]
+            grim["grim → screenshot"]
+            wl["wlrctl / wtype → mouse, key"]
+            sh["bash -c as the desktop user"]
+        end
+    end
+
+    cli -- "HTTPS · MCP" --> ts
+    connect -- "screenshot loop" --> ts
+    ts --> mcp
+    mcp -- "WS dial-out<br/>ws://pod:8090/tools/attach/{session}" --> pod
+    mcp -- "MCP_UPSTREAM browser=<br/>re-served, profile-filtered" --> pw
+    mcp --> hands
 ```
 
 Two systemd **user** units with linger enabled, both binding loopback only; `tailscale serve`
@@ -191,6 +210,28 @@ Debian `grim` has no libjpeg, so frames are PNG (~2 MB per 1080p frame); at 2 FP
 4 MB/s on the tailnet.
 
 **Lend to an openab-pty session:**
+
+```mermaid
+sequenceDiagram
+    participant H as Human (CLI / Connect)
+    participant N as hands node :8444
+    participant R as openab-pty runtime :8090
+    participant A as agent in the session
+    H->>N: POST /attach {runtime, session, profile, ttl_secs, admin_credential}
+    N->>R: POST /admin/sessions/{session}/tools-attach {ttl_secs}
+    R-->>N: {secret, expires_in}
+    N-->>H: 202 grant {id, state: idle}
+    N->>R: WS GET /tools/attach/{session} · Bearer secret
+    R-->>N: 101 (state: attached)
+    A->>R: tools/list via $OPENAB_TOOLS_MCP_URL
+    R->>N: tools/list (over the WS)
+    N-->>R: sys_info screenshot bash mouse key + 16 browser_*
+    A->>R: tools/call screenshot
+    R->>N: tools/call screenshot
+    N-->>R: image/png
+    Note over N,R: close 4010 / DELETE /attach/{id} → stop · 1000 → redial with backoff
+```
+
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' $U/attach \
