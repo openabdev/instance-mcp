@@ -91,6 +91,7 @@ deleted in an `always()` cleanup step.
    ```sh
    gh workflow run release.yml --ref v0.7.0 -f tag=v0.7.0
    ```
+
 5. Download both artifacts and verify before installing:
 
    ```sh
