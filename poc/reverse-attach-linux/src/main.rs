@@ -1,6 +1,6 @@
 // reverse-attach: makes a Linux node a lendable "hands" node for openab-pty
 // reverse-attach. Single self-contained binary: a minimal HTTP/1.1 control
-// server (POST /attach, GET /attachments) plus a WebSocket dialer that
+// server (POST/GET /attach, GET/DELETE /attach/{id}) plus a WebSocket dialer that
 // connects outbound to a runtime and serves an MCP tool surface.
 //
 // Synchronous, std threads only. Deps: serde_json + tungstenite (which
@@ -9,13 +9,14 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tungstenite::http::Request;
+use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
 
 // ---------------------------------------------------------------------------
@@ -24,10 +25,15 @@ use tungstenite::Message;
 
 #[derive(Clone)]
 struct GrantInfo {
-    grant_id: String,
+    id: String,
+    runtime: String,
     session: String,
     profile: String,
+    principal: String,
     state: String,
+    ended: Option<String>,
+    expires_at_epoch_secs: u64,
+    cancelled: Arc<AtomicBool>,
 }
 
 type Registry = Arc<Mutex<HashMap<String, GrantInfo>>>;
@@ -50,8 +56,37 @@ fn set_state(registry: &Registry, grant_id: &str, state: &str) {
     if let Ok(mut map) = registry.lock() {
         if let Some(g) = map.get_mut(grant_id) {
             g.state = state.to_string();
+            g.ended = None;
         }
     }
+}
+
+fn set_ended(registry: &Registry, grant_id: &str, reason: &str) {
+    if let Ok(mut map) = registry.lock() {
+        if let Some(g) = map.get_mut(grant_id) {
+            g.state = "ended".to_string();
+            g.ended = Some(reason.to_string());
+        }
+    }
+}
+
+/// Exact Swift `MacGrant` shape consumed by OpenAB Connect/Remote. Fields not
+/// present in the early PoC (`runtime`, `principal`, standard `id`/state) made a
+/// successful POST decode as a generic client parse failure.
+fn grant_json(g: &GrantInfo) -> Value {
+    let mut out = json!({
+        "id": g.id,
+        "runtime": g.runtime,
+        "session": g.session,
+        "profile": g.profile,
+        "principal": g.principal,
+        "state": g.state,
+        "expires_in_secs": g.expires_at_epoch_secs.saturating_sub(now_epoch_secs()),
+    });
+    if let Some(ended) = &g.ended {
+        out["ended"] = Value::String(ended.clone());
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +96,7 @@ fn set_state(registry: &Registry, grant_id: &str, state: &str) {
 fn valid_session(s: &str) -> bool {
     // ^[a-z0-9-]{1,32}$
     let len = s.len();
-    if len < 1 || len > 32 {
+    if !(1..=32).contains(&len) {
         return false;
     }
     s.bytes()
@@ -73,7 +108,11 @@ fn strip_trailing_slashes(s: &str) -> &str {
 }
 
 fn attach_url(runtime: &str, session: &str) -> String {
-    format!("{}/tools/attach/{}", strip_trailing_slashes(runtime), session)
+    format!(
+        "{}/tools/attach/{}",
+        strip_trailing_slashes(runtime),
+        session
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +126,9 @@ enum Disposition {
 
 fn disposition_close(code: u16) -> Disposition {
     match code {
-        4001 => Disposition::Stop("grantExpired".to_string()),
+        4001 => Disposition::Stop("grant_expired".to_string()),
         4002 => Disposition::Stop("replaced".to_string()),
-        4004 => Disposition::Stop("sessionEnded".to_string()),
+        4004 => Disposition::Stop("session_ended".to_string()),
         4010 => Disposition::Stop("revoked".to_string()),
         _ => Disposition::Redial,
     }
@@ -101,7 +140,7 @@ fn disposition_handshake(status: u16) -> Disposition {
         200..=299 => Disposition::Redial,
         429 => Disposition::Redial,
         500..=599 => Disposition::Redial,
-        _ => Disposition::Stop(format!("handshakeRejected({status})")),
+        _ => Disposition::Stop(format!("handshake_rejected_{status}")),
     }
 }
 
@@ -171,9 +210,7 @@ fn mint(
 
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| format!("connect failed: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("write failed: {e}"))?;
@@ -215,7 +252,8 @@ fn mint(
         .to_string();
 
     let expires_in = v
-        .get("expires_in")
+        .get("expires_in_secs")
+        .or_else(|| v.get("expires_in"))
         .or_else(|| v.get("expiresIn"))
         .and_then(|e| e.as_u64())
         .unwrap_or(ttl_secs);
@@ -227,7 +265,7 @@ fn mint(
 // WebSocket dial loop
 // ---------------------------------------------------------------------------
 
-fn dial_loop(
+struct DialGrant {
     runtime: String,
     session: String,
     secret: String,
@@ -235,11 +273,27 @@ fn dial_loop(
     deadline_epoch_secs: u64,
     registry: Registry,
     grant_id: String,
-) {
+    cancelled: Arc<AtomicBool>,
+}
+
+fn dial_loop(config: DialGrant) {
+    let DialGrant {
+        runtime,
+        session,
+        secret,
+        profile,
+        deadline_epoch_secs,
+        registry,
+        grant_id,
+        cancelled,
+    } = config;
     let mut backoff: u64 = 1;
     let cap: u64 = 30;
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
         if now_epoch_secs() >= deadline_epoch_secs {
             break;
         }
@@ -247,13 +301,12 @@ fn dial_loop(
         set_state(&registry, &grant_id, "dialing");
         let url = attach_url(&runtime, &session);
 
-        // Build a WS handshake request with the Authorization header.
         let req = match build_ws_request(&url, &secret) {
             Ok(r) => r,
-            Err(e) => {
-                set_state(&registry, &grant_id, &format!("error({e})"));
-                // treat as redial-able transient error
-                if !sleep_until_backoff(deadline_epoch_secs, &mut backoff, cap) {
+            Err(_) => {
+                set_state(&registry, &grant_id, "redialing");
+                if !sleep_until_backoff(deadline_epoch_secs, &mut backoff, cap, cancelled.as_ref())
+                {
                     break;
                 }
                 continue;
@@ -262,8 +315,20 @@ fn dial_loop(
 
         match tungstenite::connect(req) {
             Ok((mut socket, _resp)) => {
+                // DELETE must revoke an attached node promptly. The early PoC
+                // blocked in read until the runtime sent another frame. A short
+                // read timeout lets the cancellation flag close the socket in
+                // at most one second on plain ws:// (the deployed rpi1 path).
+                if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                }
+                backoff = 1; // successful attach resets transient retry history
                 set_state(&registry, &grant_id, "attached");
                 loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        let _ = socket.close(None);
+                        return;
+                    }
                     match socket.read() {
                         Ok(Message::Text(t)) => {
                             if let Some(reply) = answer(t.as_str(), &profile) {
@@ -285,68 +350,75 @@ fn dial_loop(
                         }
                         Ok(Message::Pong(_)) => {}
                         Ok(Message::Close(frame)) => {
-                            // tungstenite queues the Close reply on read; flush it so the
-                            // runtime sees a clean close handshake rather than a bare EOF.
                             let _ = socket.flush();
-                            let code = frame
-                                .as_ref()
-                                .map(|f| u16::from(f.code))
-                                .unwrap_or(1000);
+                            let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1000);
                             match disposition_close(code) {
                                 Disposition::Stop(reason) => {
-                                    set_state(
-                                        &registry,
-                                        &grant_id,
-                                        &format!("stopped({reason})"),
-                                    );
+                                    set_ended(&registry, &grant_id, &reason);
                                     return;
                                 }
                                 Disposition::Redial => break,
                             }
                         }
                         Ok(Message::Frame(_)) => {}
+                        Err(tungstenite::Error::Io(ref error))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue;
+                        }
                         Err(_) => break,
                     }
                 }
             }
-            Err(e) => {
-                // Map handshake HTTP status if we can extract one.
-                if let Some(status) = handshake_status(&e) {
+            Err(error) => {
+                if let Some(status) = handshake_status(&error) {
                     match disposition_handshake(status) {
                         Disposition::Stop(reason) => {
-                            set_state(&registry, &grant_id, &format!("stopped({reason})"));
+                            set_ended(&registry, &grant_id, &reason);
                             return;
                         }
                         Disposition::Redial => {}
                     }
                 }
-                // else: transient connect error -> redial
             }
         }
 
-        // Redial with backoff.
-        if !sleep_until_backoff(deadline_epoch_secs, &mut backoff, cap) {
+        set_state(&registry, &grant_id, "redialing");
+        if !sleep_until_backoff(deadline_epoch_secs, &mut backoff, cap, cancelled.as_ref()) {
             break;
         }
     }
 
-    set_state(&registry, &grant_id, "ended(deadline)");
+    if !cancelled.load(Ordering::Acquire) {
+        set_ended(&registry, &grant_id, "deadline");
+    }
 }
 
-// Sleep min(backoff, remaining_to_deadline); grow backoff. Returns false if
-// the deadline has already passed (caller should stop).
-fn sleep_until_backoff(deadline_epoch_secs: u64, backoff: &mut u64, cap: u64) -> bool {
+// Sleep min(backoff, remaining_to_deadline), checking DELETE cancellation every
+// 100 ms; grow backoff. Returns false at deadline or cancellation.
+fn sleep_until_backoff(
+    deadline_epoch_secs: u64,
+    backoff: &mut u64,
+    cap: u64,
+    cancelled: &AtomicBool,
+) -> bool {
     let now = now_epoch_secs();
-    if now >= deadline_epoch_secs {
+    if now >= deadline_epoch_secs || cancelled.load(Ordering::Acquire) {
         return false;
     }
     let remaining = deadline_epoch_secs - now;
     let nap = (*backoff).min(remaining);
-    if nap > 0 {
-        thread::sleep(Duration::from_secs(nap));
+    for _ in 0..nap.saturating_mul(10) {
+        if cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     *backoff = (*backoff * 2).min(cap);
-    now_epoch_secs() < deadline_epoch_secs
+    now_epoch_secs() < deadline_epoch_secs && !cancelled.load(Ordering::Acquire)
 }
 
 fn build_ws_request(url: &str, secret: &str) -> Result<Request<()>, String> {
@@ -399,11 +471,7 @@ fn answer(text: &str, profile: &str) -> Option<String> {
     };
 
     // Notifications have no id -> no response.
-    let id = req.get("id").cloned();
-    if id.is_none() {
-        return None;
-    }
-    let id = id.unwrap();
+    let id = req.get("id").cloned()?;
 
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
@@ -535,8 +603,7 @@ fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String
 
 // Wrap a structured value into the MCP tool result shape.
 fn tool_result(structured: Value) -> Value {
-    let text = serde_json::to_string_pretty(&structured)
-        .unwrap_or_else(|_| structured.to_string());
+    let text = serde_json::to_string_pretty(&structured).unwrap_or_else(|_| structured.to_string());
     json!({
         "content": [ { "type": "text", "text": text } ],
         "structuredContent": structured
@@ -548,7 +615,9 @@ fn tool_result(structured: Value) -> Value {
 // ---------------------------------------------------------------------------
 
 fn read_file_trim(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 fn tool_sys_info() -> Value {
@@ -557,42 +626,44 @@ fn tool_sys_info() -> Value {
         .ok()
         .and_then(|content| {
             content.lines().find_map(|line| {
-                line.strip_prefix("PRETTY_NAME=").map(|v| {
-                    v.trim().trim_matches('"').to_string()
-                })
+                line.strip_prefix("PRETTY_NAME=")
+                    .map(|v| v.trim().trim_matches('"').to_string())
             })
         })
         .unwrap_or_else(|| "unknown".to_string());
 
     // processor count from /proc/cpuinfo
     let cpu_count = std::fs::read_to_string("/proc/cpuinfo")
-        .map(|c| {
-            c.lines()
-                .filter(|l| l.starts_with("processor"))
-                .count()
-        })
+        .map(|c| c.lines().filter(|l| l.starts_with("processor")).count())
         .unwrap_or(0);
 
     // MemTotal from /proc/meminfo
     let mem_total = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|content| {
-            content.lines().find_map(|line| {
-                line.strip_prefix("MemTotal:").map(|v| v.trim().to_string())
-            })
+            content
+                .lines()
+                .find_map(|line| line.strip_prefix("MemTotal:").map(|v| v.trim().to_string()))
         })
         .unwrap_or_else(|| "unknown".to_string());
 
     let arch = std::env::consts::ARCH;
 
-    let hostname = read_file_trim("/proc/sys/kernel/hostname")
-        .unwrap_or_else(|| "unknown".to_string());
+    let hostname =
+        read_file_trim("/proc/sys/kernel/hostname").unwrap_or_else(|| "unknown".to_string());
 
     // `host` / `displays` / `permissions` / `agent` are what OpenAB Connect's
     // Screens pane reads; the rest is ours.
     let display_ok = std::process::Command::new("grim")
-        .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into()))
-        .env("XDG_RUNTIME_DIR", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc_getuid() })))
+        .env(
+            "WAYLAND_DISPLAY",
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into()),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            std::env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc_getuid() })),
+        )
         .args(["-s", "0.05", "-t", "png", "-"])
         .output()
         .map(|o| o.status.success())
@@ -611,13 +682,19 @@ fn tool_sys_info() -> Value {
 }
 
 fn tool_screenshot(arguments: &Value) -> Result<Value, (i64, String)> {
-    let scale = arguments.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let scale = arguments
+        .get("scale")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5);
     let format = arguments
         .get("format")
         .and_then(|v| v.as_str())
         .unwrap_or("png")
         .to_string();
-    let quality = arguments.get("quality").and_then(|v| v.as_i64()).unwrap_or(80);
+    let quality = arguments
+        .get("quality")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(80);
     if !(0.05..=2.0).contains(&scale) {
         return Err((-32602, "scale must be in 0.05..=2.0".to_string()));
     }
@@ -628,7 +705,9 @@ fn tool_screenshot(arguments: &Value) -> Result<Value, (i64, String)> {
         return Err((-32602, "quality must be in 1..=100".to_string()));
     }
 
-    let mut out = grim_command(scale, &format, quality).output().map_err(|e| (-32000, format!("grim: {e}")))?;
+    let mut out = grim_command(scale, &format, quality)
+        .output()
+        .map_err(|e| (-32000, format!("grim: {e}")))?;
     let mut format = format;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -647,7 +726,11 @@ fn tool_screenshot(arguments: &Value) -> Result<Value, (i64, String)> {
             return Err((-32000, format!("grim failed ({}): {err}", out.status)));
         }
     }
-    let mime = if format == "png" { "image/png" } else { "image/jpeg" };
+    let mime = if format == "png" {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
     let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &out.stdout);
     Ok(json!({
         "content": [ { "type": "image", "mimeType": mime, "data": data } ],
@@ -663,7 +746,10 @@ fn grim_command(scale: f64, format: &str, quality: i64) -> std::process::Command
         cmd.env("WAYLAND_DISPLAY", "wayland-0");
     }
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc_getuid() }));
+        cmd.env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", unsafe { libc_getuid() }),
+        );
     }
     cmd.arg("-s").arg(format!("{scale}")).arg("-t").arg(format);
     if format == "jpeg" {
@@ -712,7 +798,9 @@ fn tool_bash(arguments: &Value) -> Result<Value, (i64, String)> {
         }
         cmd.current_dir(cwd);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let started = std::time::Instant::now();
     let mut child = cmd.spawn().map_err(|e| (-32000, format!("spawn: {e}")))?;
@@ -799,7 +887,10 @@ fn seat_command(bin: &str) -> std::process::Command {
         cmd.env("WAYLAND_DISPLAY", "wayland-0");
     }
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc_getuid() }));
+        cmd.env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", unsafe { libc_getuid() }),
+        );
     }
     cmd
 }
@@ -833,7 +924,12 @@ fn pointer_goto(x: f64, y: f64) -> Result<(), (i64, String)> {
     run_seat("wlrctl", &sv(&["pointer", "move", "-20000", "-20000"]))?;
     run_seat(
         "wlrctl",
-        &sv(&["pointer", "move", &format!("{}", x.round() as i64), &format!("{}", y.round() as i64)]),
+        &sv(&[
+            "pointer",
+            "move",
+            &format!("{}", x.round() as i64),
+            &format!("{}", y.round() as i64),
+        ]),
     )
 }
 
@@ -862,7 +958,11 @@ fn tool_mouse(arguments: &Value) -> Result<Value, (i64, String)> {
                 pointer_goto(x, y)?;
                 thread::sleep(Duration::from_millis(40));
             }
-            let button = if action == "right_click" { "right" } else { "left" };
+            let button = if action == "right_click" {
+                "right"
+            } else {
+                "left"
+            };
             run_seat("wlrctl", &sv(&["pointer", "click", button]))?;
             if action == "double_click" {
                 thread::sleep(Duration::from_millis(60));
@@ -880,7 +980,12 @@ fn tool_mouse(arguments: &Value) -> Result<Value, (i64, String)> {
             thread::sleep(Duration::from_millis(60));
             run_seat(
                 "wlrctl",
-                &sv(&["pointer", "move", &format!("{}", (tx - x).round() as i64), &format!("{}", (ty - y).round() as i64)]),
+                &sv(&[
+                    "pointer",
+                    "move",
+                    &format!("{}", (tx - x).round() as i64),
+                    &format!("{}", (ty - y).round() as i64),
+                ]),
             )?;
             thread::sleep(Duration::from_millis(60));
             run_seat("wlrctl", &sv(&["pointer", "release", "left"]))?;
@@ -891,7 +996,15 @@ fn tool_mouse(arguments: &Value) -> Result<Value, (i64, String)> {
             }
             let dy = num(arguments, "dy").unwrap_or(0.0);
             let dx = num(arguments, "dx").unwrap_or(0.0);
-            run_seat("wlrctl", &sv(&["pointer", "scroll", &format!("{}", dy.round() as i64), &format!("{}", dx.round() as i64)]))?;
+            run_seat(
+                "wlrctl",
+                &sv(&[
+                    "pointer",
+                    "scroll",
+                    &format!("{}", dy.round() as i64),
+                    &format!("{}", dx.round() as i64),
+                ]),
+            )?;
         }
         other => return Err((-32602, format!("unknown mouse action: {other}"))),
     }
@@ -911,19 +1024,39 @@ fn tool_key(arguments: &Value) -> Result<Value, (i64, String)> {
                 .ok_or_else(|| (-32602, "type needs text".to_string()))?;
             // `--` so text starting with '-' is not parsed as a flag.
             run_seat("wtype", &sv(&["--", text]))?;
-            Ok(tool_result(json!({ "ok": true, "action": "type", "chars": text.chars().count() })))
+            Ok(tool_result(
+                json!({ "ok": true, "action": "type", "chars": text.chars().count() }),
+            ))
         }
         "press" => {
             let combo = arguments
                 .get("combo")
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| (-32602, "press needs combo".to_string()))?;
-            let parts: Vec<&str> = combo.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+            let parts: Vec<&str> = combo
+                .split('+')
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .collect();
             let (mods, keys): (Vec<&str>, Vec<&str>) = parts.iter().partition(|p| {
-                matches!(p.to_ascii_lowercase().as_str(), "ctrl" | "control" | "shift" | "alt" | "super" | "cmd" | "meta" | "win" | "altgr")
+                matches!(
+                    p.to_ascii_lowercase().as_str(),
+                    "ctrl"
+                        | "control"
+                        | "shift"
+                        | "alt"
+                        | "super"
+                        | "cmd"
+                        | "meta"
+                        | "win"
+                        | "altgr"
+                )
             });
             if keys.len() != 1 {
-                return Err((-32602, format!("combo must have exactly one non-modifier key: {combo}")));
+                return Err((
+                    -32602,
+                    format!("combo must have exactly one non-modifier key: {combo}"),
+                ));
             }
             let norm = |m: &str| match m.to_ascii_lowercase().as_str() {
                 "control" => "ctrl".to_string(),
@@ -949,7 +1082,9 @@ fn tool_key(arguments: &Value) -> Result<Value, (i64, String)> {
                 args.push(norm(m));
             }
             run_seat("wtype", &args)?;
-            Ok(tool_result(json!({ "ok": true, "action": "press", "combo": combo })))
+            Ok(tool_result(
+                json!({ "ok": true, "action": "press", "combo": combo }),
+            ))
         }
         other => Err((-32602, format!("unknown key action: {other}"))),
     }
@@ -993,11 +1128,17 @@ impl AuthPolicy {
             Ok("1") | Ok("true")
         );
         if token.is_none() && allow_logins.is_empty() && !insecure_local {
-            return Err("refusing to start with no auth: set MCP_TOKEN / MCP_TOKEN_FILE and/or \
+            return Err(
+                "refusing to start with no auth: set MCP_TOKEN / MCP_TOKEN_FILE and/or \
                         MCP_ALLOW_LOGIN (or MCP_INSECURE_LOCAL=1 for loopback debugging)"
-                .to_string());
+                    .to_string(),
+            );
         }
-        Ok(AuthPolicy { token, allow_logins, insecure_local })
+        Ok(AuthPolicy {
+            token,
+            allow_logins,
+            insecure_local,
+        })
     }
 
     fn describe(&self) -> String {
@@ -1009,8 +1150,9 @@ impl AuthPolicy {
         )
     }
 
-    /// Ok(()) or Err(reason) — reason is logged, never sent to the client.
-    fn check(&self, req: &HttpRequest) -> Result<(), String> {
+    /// The authenticated principal matches the Swift AuthPolicy contract:
+    /// allowlisted Tailscale login, `token`, or debug-only `local`.
+    fn check(&self, req: &HttpRequest) -> Result<String, String> {
         if let Some(expected) = &self.token {
             let got = req
                 .authorization
@@ -1021,24 +1163,27 @@ impl AuthPolicy {
                 return Err("bearer token missing or wrong".to_string());
             }
         }
+        let login = req.ts_login.as_deref().map(|l| l.to_lowercase());
         if !self.allow_logins.is_empty() {
-            match req.ts_login.as_deref().map(|l| l.to_lowercase()) {
-                Some(l) if self.allow_logins.contains(&l) => {}
+            match login {
+                Some(ref l) if self.allow_logins.contains(l) => return Ok(l.clone()),
                 Some(l) => return Err(format!("login {l} not allowed")),
-                None => {
-                    if !(self.insecure_local && req.peer_is_loopback) {
-                        return Err("no Tailscale-User-Login header".to_string());
-                    }
+                None if self.insecure_local && req.peer_is_loopback => {
+                    return Ok("local".to_string())
                 }
+                None => return Err("no Tailscale-User-Login header".to_string()),
             }
         }
-        if self.token.is_none() && self.allow_logins.is_empty() {
-            // insecure_local only
-            if !req.peer_is_loopback {
-                return Err("insecure-local: non-loopback peer".to_string());
-            }
+        if let Some(login) = login {
+            return Ok(login);
         }
-        Ok(())
+        if self.token.is_some() {
+            return Ok("token".to_string());
+        }
+        if self.insecure_local && req.peer_is_loopback {
+            return Ok("local".to_string());
+        }
+        Err("unauthenticated".to_string())
     }
 }
 
@@ -1159,7 +1304,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     // Read remaining body bytes.
     let mut body_bytes: Vec<u8> = buf[header_end..].to_vec();
     while body_bytes.len() < content_length {
-        let n = stream.read(&mut tmp).map_err(|e| format!("read body: {e}"))?;
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("read body: {e}"))?;
         if n == 0 {
             break;
         }
@@ -1183,9 +1330,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn write_raw(
@@ -1215,13 +1360,32 @@ fn write_raw(
 fn handle_mcp(stream: &mut TcpStream, body: &str) -> Result<(), String> {
     let is_initialize = serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|m| m == "initialize"))
+        .and_then(|v| {
+            v.get("method")
+                .and_then(|m| m.as_str())
+                .map(|m| m == "initialize")
+        })
         .unwrap_or(false);
     match answer(body, "owner") {
         Some(reply) => {
-            let sid = format!("s-{}-{}", now_epoch_secs(), GRANT_COUNTER.fetch_add(1, Ordering::SeqCst));
-            let extra: Vec<(&str, &str)> = if is_initialize { vec![("Mcp-Session-Id", &sid)] } else { vec![] };
-            write_raw(stream, 200, "OK", "application/json", reply.as_bytes(), &extra);
+            let sid = format!(
+                "s-{}-{}",
+                now_epoch_secs(),
+                GRANT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            );
+            let extra: Vec<(&str, &str)> = if is_initialize {
+                vec![("Mcp-Session-Id", &sid)]
+            } else {
+                vec![]
+            };
+            write_raw(
+                stream,
+                200,
+                "OK",
+                "application/json",
+                reply.as_bytes(),
+                &extra,
+            );
         }
         None => write_raw(stream, 202, "Accepted", "text/plain", b"", &[]),
     }
@@ -1260,25 +1424,54 @@ fn handle_conn(
         return Ok(());
     }
 
-    if let Err(reason) = policy.check(&req) {
-        eprintln!("deny {} {} : {reason}", req.method, route);
-        write_response(&mut stream, 401, "Unauthorized", "{\"error\":\"unauthorized\"}");
-        return Ok(());
-    }
+    let principal = match policy.check(&req) {
+        Ok(principal) => principal,
+        Err(reason) => {
+            eprintln!("deny {} {} : {reason}", req.method, route);
+            write_response(
+                &mut stream,
+                401,
+                "Unauthorized",
+                "{\"error\":\"unauthorized\"}",
+            );
+            return Ok(());
+        }
+    };
 
     match (req.method.as_str(), route.as_str()) {
         ("POST", "/mcp") => handle_mcp(&mut stream, &req.body),
         ("GET", "/mcp") => {
             // No server-initiated stream in this PoC.
-            write_response(&mut stream, 405, "Method Not Allowed", "{\"error\":\"no SSE stream\"}");
+            write_response(
+                &mut stream,
+                405,
+                "Method Not Allowed",
+                "{\"error\":\"no SSE stream\"}",
+            );
             Ok(())
         }
         ("DELETE", "/mcp") => {
             write_raw(&mut stream, 204, "No Content", "text/plain", b"", &[]);
             Ok(())
         }
-        ("POST", "/attach") => handle_attach(&mut stream, &req.body, registry),
-        ("GET", "/attachments") => handle_attachments(&mut stream, registry),
+        ("POST", "/attach") => handle_attach(&mut stream, &req.body, registry, &principal),
+        ("GET", "/attach") => handle_attachments(&mut stream, registry),
+        _ if route.starts_with("/attach/") => {
+            let grant_id = route.trim_start_matches("/attach/");
+            match req.method.as_str() {
+                "GET" => handle_attachment(&mut stream, registry, grant_id),
+                "DELETE" => handle_delete_attachment(&mut stream, registry, grant_id),
+                _ => {
+                    write_response(
+                        &mut stream,
+                        405,
+                        "Method Not Allowed",
+                        "{\"error\":\"method not allowed\"}",
+                    );
+                    Ok(())
+                }
+            }
+        }
         _ => {
             let body = json!({ "error": "not found" }).to_string();
             write_response(&mut stream, 404, "Not Found", &body);
@@ -1297,6 +1490,7 @@ fn handle_attach(
     stream: &mut TcpStream,
     body: &str,
     registry: Registry,
+    principal: &str,
 ) -> Result<(), String> {
     let parsed: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -1351,16 +1545,36 @@ fn handle_attach(
 
     let deadline = now_epoch_secs() + expires_in_secs;
     let grant_id = new_grant_id();
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     {
-        let mut map = registry.lock().map_err(|_| "registry poisoned".to_string())?;
+        let mut map = registry
+            .lock()
+            .map_err(|_| "registry poisoned".to_string())?;
+        // Same replacement semantics as Swift AttachManager: one grant per
+        // (runtime, session). A new grant cancels and removes the incumbent.
+        let replaced: Vec<String> = map
+            .iter()
+            .filter(|(_, g)| g.runtime == runtime && g.session == session)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in replaced {
+            if let Some(old) = map.remove(&id) {
+                old.cancelled.store(true, Ordering::Release);
+            }
+        }
         map.insert(
             grant_id.clone(),
             GrantInfo {
-                grant_id: grant_id.clone(),
+                id: grant_id.clone(),
+                runtime: runtime.to_string(),
                 session: session.to_string(),
                 profile: profile.clone(),
-                state: "starting".to_string(),
+                principal: principal.to_string(),
+                state: "idle".to_string(),
+                ended: None,
+                expires_at_epoch_secs: deadline,
+                cancelled: cancelled.clone(),
             },
         );
     }
@@ -1372,43 +1586,76 @@ fn handle_attach(
     let profile_owned = profile.clone();
     let gid = grant_id.clone();
     thread::spawn(move || {
-        dial_loop(
-            runtime_owned,
-            session_owned,
-            effective_secret,
-            profile_owned,
-            deadline,
-            reg,
-            gid,
-        );
+        dial_loop(DialGrant {
+            runtime: runtime_owned,
+            session: session_owned,
+            secret: effective_secret,
+            profile: profile_owned,
+            deadline_epoch_secs: deadline,
+            registry: reg,
+            grant_id: gid,
+            cancelled,
+        });
     });
 
-    let resp = json!({
-        "grant_id": grant_id,
-        "session": session,
-        "profile": profile,
-        "expires_in_secs": expires_in_secs
-    })
-    .to_string();
-    write_response(stream, 200, "OK", &resp);
+    let response = {
+        let map = registry
+            .lock()
+            .map_err(|_| "registry poisoned".to_string())?;
+        grant_json(
+            map.get(&grant_id)
+                .ok_or_else(|| "grant disappeared".to_string())?,
+        )
+    };
+    write_response(stream, 202, "Accepted", &response.to_string());
     Ok(())
 }
 
 fn handle_attachments(stream: &mut TcpStream, registry: Registry) -> Result<(), String> {
-    let list: Vec<Value> = {
-        let map = registry.lock().map_err(|_| "registry poisoned".to_string())?;
-        map.values()
-            .map(|g| {
-                json!({
-                    "grant_id": g.grant_id,
-                    "session": g.session,
-                    "profile": g.profile,
-                    "state": g.state
-                })
-            })
-            .collect()
+    let grants: Vec<Value> = {
+        let map = registry
+            .lock()
+            .map_err(|_| "registry poisoned".to_string())?;
+        map.values().map(grant_json).collect()
     };
-    let body = Value::Array(list).to_string();
+    let body = json!({ "grants": grants }).to_string();
     write_response(stream, 200, "OK", &body);
+    Ok(())
+}
+
+fn handle_attachment(
+    stream: &mut TcpStream,
+    registry: Registry,
+    grant_id: &str,
+) -> Result<(), String> {
+    let grant = {
+        let map = registry
+            .lock()
+            .map_err(|_| "registry poisoned".to_string())?;
+        map.get(grant_id).map(grant_json)
+    };
+    match grant {
+        Some(grant) => write_response(stream, 200, "OK", &grant.to_string()),
+        None => write_response(stream, 404, "Not Found", "{\"error\":\"no such grant\"}"),
+    }
+    Ok(())
+}
+
+fn handle_delete_attachment(
+    stream: &mut TcpStream,
+    registry: Registry,
+    grant_id: &str,
+) -> Result<(), String> {
+    let removed = registry
+        .lock()
+        .map_err(|_| "registry poisoned".to_string())?
+        .remove(grant_id);
+    match removed {
+        Some(grant) => {
+            grant.cancelled.store(true, Ordering::Release);
+            write_raw(stream, 204, "No Content", "text/plain", b"", &[]);
+        }
+        None => write_response(stream, 404, "Not Found", "{\"error\":\"no such grant\"}"),
+    }
     Ok(())
 }

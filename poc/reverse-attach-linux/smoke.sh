@@ -24,7 +24,8 @@ sleep 0.5
 trap 'kill $MOCK $RA 2>/dev/null' EXIT
 
 C="curl -s -m 5"
-state_of() { python3 -c 'import sys,json;print([g["state"] for g in json.load(sys.stdin) if g["session"]==sys.argv[1]][0])' "$1"; }
+state_of() { python3 -c 'import sys,json;print([g["state"] for g in json.load(sys.stdin)["grants"] if g["session"]==sys.argv[1]][0])' "$1"; }
+ended_of() { python3 -c 'import sys,json;print([g.get("ended","") for g in json.load(sys.stdin)["grants"] if g["session"]==sys.argv[1]][0])' "$1"; }
 
 echo "== validation =="
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"http://x","session":"a","secret":"s"}')
@@ -43,19 +44,28 @@ r=$($C -o /dev/null -w '%{http_code}' 127.0.0.1:8790/nope)
 check "404 on unknown route" "[[ '$r' == 404 ]]"
 
 echo "== admin_credential mint path (session laptop) =="
-r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"laptop","profile":"owner","ttl_secs":60,"admin_credential":"admin-secret"}')
+raw=$($C -w '\n%{http_code}' -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"laptop","profile":"owner","ttl_secs":60,"admin_credential":"admin-secret"}')
+code=$(echo "$raw" | tail -1); r=$(echo "$raw" | sed '$d')
 echo "$r"
-GID=$(echo "$r" | python3 -c 'import sys,json;print(json.load(sys.stdin)["grant_id"])')
+check "POST /attach → 202" "[[ '$code' == 202 ]]"
+GID=$(echo "$r" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+check "Connect grant shape" "echo '$r' | python3 -c 'import sys,json; g=json.load(sys.stdin); assert all(k in g for k in (\"id\",\"runtime\",\"session\",\"profile\",\"principal\",\"state\",\"expires_in_secs\"))'"
 check "grant returned" "[[ -n '$GID' ]]"
 check "expires_in_secs=60 forwarded" "[[ '$r' == *'\"expires_in_secs\":60'* ]]"
 check "mint saw ttl_secs=60" "grep -q '\"ev\": \"mint\", \"session\": \"laptop\", \"status\": 200, \"ttl_secs\": 60' $LOG"
 
 # wait: attach#1 → MCP script → close 1000 → redial after 1s → attach#2 → close 4010 → stop
 for i in $(seq 1 20); do grep -q '"code": 4010, "nth": 2' $LOG 2>/dev/null && break; sleep 0.5; done
-st=$($C 127.0.0.1:8790/attachments)
+st=$($C 127.0.0.1:8790/attach)
 echo "$st"
+check "GET /attach wraps grants" "echo '$st' | python3 -c 'import sys,json; assert isinstance(json.load(sys.stdin)[\"grants\"], list)'"
+check "GET /attach/{id}" "[[ \$($C -o /dev/null -w '%{http_code}' 127.0.0.1:8790/attach/$GID) == 200 ]]"
 check "two attaches happened (1000 redialed)" "grep -q '\"nth\": 2' $LOG"
-check "state stopped(revoked) after 4010" "[[ '$st' == *'stopped(revoked)'* ]]"
+check "state ended/revoked after 4010" "[[ \$(echo '$st' | state_of laptop) == ended && \$(echo '$st' | ended_of laptop) == revoked ]]"
+code=$($C -o /dev/null -w '%{http_code}' -X DELETE 127.0.0.1:8790/attach/$GID)
+check "DELETE /attach/{id} → 204" "[[ '$code' == 204 ]]"
+check "deleted grant GET → 404" "[[ \$($C -o /dev/null -w '%{http_code}' 127.0.0.1:8790/attach/$GID) == 404 ]]"
+
 check "close frame echoed by client (both attaches)" "[[ \$(grep -c '\"ev\": \"close_echo\"' $LOG) == 2 ]]"
 
 echo "== MCP surface (from mock's view of attach #1) =="
@@ -98,22 +108,22 @@ check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_in
 check "sandbox bash ran on node" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
 check "no sleep leaked after timeout" "! pgrep -f 'sleep 30' >/dev/null"
 check "close frame echoed (sandbox attach)" "grep -q '\"ev\": \"close_echo\"' $LOG"
-st=$($C 127.0.0.1:8790/attachments); echo "$st"
-check "sandbox grant stopped(revoked) (CLOSES tail=4010)" "[[ \$(echo '$st' | state_of pre) == 'stopped(revoked)' ]]"
+st=$($C 127.0.0.1:8790/attach); echo "$st"
+check "sandbox grant ended/revoked (CLOSES tail=4010)" "[[ \$(echo '$st' | state_of pre) == ended && \$(echo '$st' | ended_of pre) == revoked ]]"
 
 echo "== wrong secret → handshake 401 → stop =="
 : > $LOG
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"pre","ttl_secs":30,"secret":"WRONG"}')
 sleep 1.5
-st=$($C 127.0.0.1:8790/attachments)
-check "401 handshake → stopped(handshakeRejected(401))" "[[ '$st' == *'handshakeRejected(401)'* ]]"
+st=$($C 127.0.0.1:8790/attach)
+check "401 handshake → ended/handshake_rejected_401" "[[ \$(echo '$st' | state_of pre) == ended && \$(echo '$st' | ended_of pre) == handshake_rejected_401 ]]"
 check "no redial storm on 401 (exactly one attach attempt)" "[[ \$(grep -c '\"ev\": \"attach\", \"session\": \"pre\", \"status\": 401' $LOG) == 1 ]]"
 
 echo "== runtime unreachable → redial with backoff until deadline =="
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:1","session":"dead","ttl_secs":4,"secret":"s"}')
 sleep 5.5
-st=$($C 127.0.0.1:8790/attachments)
-check "unreachable runtime ends at deadline" "[[ \$(echo '$st' | state_of dead) == 'ended(deadline)' ]]"
+st=$($C 127.0.0.1:8790/attach)
+check "unreachable runtime ends at deadline" "[[ \$(echo '$st' | state_of dead) == ended && \$(echo '$st' | ended_of dead) == deadline ]]"
 
 echo
 echo "reverse-attach stderr:"; sed 's/^/  /' $RA_LOG
