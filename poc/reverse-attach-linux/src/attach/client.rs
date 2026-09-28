@@ -18,7 +18,7 @@ use crate::mcp::answer;
 // mint(): replicate the Swift runtimeMintRequest contract (http/ws only)
 // ---------------------------------------------------------------------------
 
-fn mint(
+pub(crate) fn mint(
     runtime: &str,
     session: &str,
     admin_credential: &str,
@@ -135,18 +135,18 @@ fn mint(
 // WebSocket dial loop
 // ---------------------------------------------------------------------------
 
-struct DialGrant {
-    runtime: String,
-    session: String,
-    secret: String,
-    profile: String,
-    deadline_epoch_secs: u64,
-    registry: Registry,
-    grant_id: String,
-    cancelled: Arc<AtomicBool>,
+pub(crate) struct DialGrant {
+    pub(crate) runtime: String,
+    pub(crate) session: String,
+    pub(crate) secret: String,
+    pub(crate) profile: String,
+    pub(crate) deadline_epoch_secs: u64,
+    pub(crate) registry: Registry,
+    pub(crate) grant_id: String,
+    pub(crate) cancelled: Arc<AtomicBool>,
 }
 
-fn dial_loop(config: DialGrant) {
+pub(crate) fn dial_loop(config: DialGrant) {
     let DialGrant {
         runtime,
         session,

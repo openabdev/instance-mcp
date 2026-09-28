@@ -9,14 +9,14 @@ use crate::http::HttpRequest;
 //   MCP_INSECURE_LOCAL=1         allow bare loopback requests with nothing else set
 // ---------------------------------------------------------------------------
 
-struct AuthPolicy {
+pub(crate) struct AuthPolicy {
     token: Option<String>,
     allow_logins: Vec<String>,
     insecure_local: bool,
 }
 
 impl AuthPolicy {
-    fn from_env() -> Result<AuthPolicy, String> {
+    pub(crate) fn from_env() -> Result<AuthPolicy, String> {
         let mut token = std::env::var("MCP_TOKEN").ok().filter(|s| !s.is_empty());
         if token.is_none() {
             if let Ok(path) = std::env::var("MCP_TOKEN_FILE") {
@@ -52,7 +52,7 @@ impl AuthPolicy {
         })
     }
 
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         format!(
             "token={} allow_login={:?} insecure_local={}",
             self.token.is_some(),
@@ -63,7 +63,7 @@ impl AuthPolicy {
 
     /// The authenticated principal matches the Swift AuthPolicy contract:
     /// allowlisted Tailscale login, `token`, or debug-only `local`.
-    fn check(&self, req: &HttpRequest) -> Result<String, String> {
+    pub(crate) fn check(&self, req: &HttpRequest) -> Result<String, String> {
         if let Some(expected) = &self.token {
             let got = req
                 .authorization

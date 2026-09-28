@@ -1,29 +1,32 @@
 //! HTTP/1.1, both directions, on std sockets: a tiny blocking client (upstream MCP, http:// only) and the loopback control server with its routes.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::attach::client::{dial_loop, mint, DialGrant};
-use crate::attach::*;
+use crate::attach::{
+    grant_json, new_grant_id, now_epoch_secs, valid_session, GrantInfo, Registry, GRANT_COUNTER,
+};
 use crate::auth::AuthPolicy;
 use crate::mcp::{answer, Upstream, UPSTREAMS};
 
 // Tiny blocking HTTP/1.1 client for http:// only (used for the upstream MCP)
 // ---------------------------------------------------------------------------
 
-struct HttpReply {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: String,
+pub(crate) struct HttpReply {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: String,
 }
 
-fn http_post(
+pub(crate) fn http_post(
     url: &str,
     headers: &[(&str, &str)],
     body: &str,
@@ -121,7 +124,7 @@ fn dechunk(s: &str) -> String {
 }
 
 /// JSON body, or the first `data:` line of an SSE body.
-fn parse_mcp_body(body: &str) -> Result<Value, String> {
+pub(crate) fn parse_mcp_body(body: &str) -> Result<Value, String> {
     let t = body.trim();
     if let Ok(v) = serde_json::from_str::<Value>(t) {
         return Ok(v);
@@ -184,13 +187,13 @@ pub fn serve() {
     }
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    body: String,
-    authorization: Option<String>,
-    ts_login: Option<String>,
-    peer_is_loopback: bool,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) body: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) ts_login: Option<String>,
+    pub(crate) peer_is_loopback: bool,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {

@@ -6,23 +6,23 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::http::{http_post, parse_mcp_body, HttpReply};
-use crate::tools;
+use crate::tools::{tool_bash, tool_key, tool_mouse, tool_result, tool_screenshot, tool_sys_info};
 
 // Upstream MCP (e.g. @playwright/mcp on loopback), re-served under our tools/list.
 // Mirrors Swift `UpstreamMCP`: Streamable HTTP request/response, session id held
 // here and re-established on 400/404, tools cached 30 s, down → tools absent.
 // ---------------------------------------------------------------------------
 
-struct Upstream {
-    name: String,
-    url: String,
-    session_id: Mutex<Option<String>>,
-    cache: Mutex<Option<(std::time::Instant, Vec<Value>)>>,
+pub(crate) struct Upstream {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) session_id: Mutex<Option<String>>,
+    pub(crate) cache: Mutex<Option<(std::time::Instant, Vec<Value>)>>,
 }
 
 impl Upstream {
     /// MCP_UPSTREAM="browser=http://127.0.0.1:8794/mcp[,name=url...]"
-    fn from_env() -> Vec<Arc<Upstream>> {
+    pub(crate) fn from_env() -> Vec<Arc<Upstream>> {
         std::env::var("MCP_UPSTREAM")
             .unwrap_or_default()
             .split(',')
@@ -86,7 +86,7 @@ impl Upstream {
         Ok(())
     }
 
-    fn rpc(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+    pub(crate) fn rpc(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
         if self
             .session_id
             .lock()
@@ -121,7 +121,7 @@ impl Upstream {
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    fn tools(&self) -> Vec<Value> {
+    pub(crate) fn tools(&self) -> Vec<Value> {
         if let Ok(c) = self.cache.lock() {
             if let Some((at, t)) = c.as_ref() {
                 if at.elapsed() < Duration::from_secs(30) {
@@ -154,7 +154,7 @@ impl Upstream {
 /// Same list as Swift `ToolProfile.sandboxBrowserTools`: navigate / read / interact.
 /// Everything else from the upstream (run_code_unsafe, upload, pdf, network, raw
 /// mouse-by-coordinate, dialogs, close, and any new tool) is denied under sandbox.
-const SANDBOX_BROWSER_TOOLS: &[&str] = &[
+pub(crate) const SANDBOX_BROWSER_TOOLS: &[&str] = &[
     "browser_click",
     "browser_console_messages",
     "browser_evaluate",
@@ -173,18 +173,21 @@ const SANDBOX_BROWSER_TOOLS: &[&str] = &[
     "browser_wait_for",
 ];
 
-fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
+pub(crate) fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
     profile != "sandbox" || SANDBOX_BROWSER_TOOLS.contains(&name)
 }
 
-static UPSTREAMS: Mutex<Vec<Arc<Upstream>>> = Mutex::new(Vec::new());
+pub(crate) static UPSTREAMS: Mutex<Vec<Arc<Upstream>>> = Mutex::new(Vec::new());
 
-fn upstreams() -> Vec<Arc<Upstream>> {
+pub(crate) fn upstreams() -> Vec<Arc<Upstream>> {
     UPSTREAMS.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// Upstream tools visible to `profile`, excluding names that collide with local tools.
-fn upstream_tools_for(profile: &str, local_names: &[&str]) -> Vec<(Arc<Upstream>, Value)> {
+pub(crate) fn upstream_tools_for(
+    profile: &str,
+    local_names: &[&str],
+) -> Vec<(Arc<Upstream>, Value)> {
     let mut out = Vec::new();
     for up in upstreams() {
         for t in up.tools() {
@@ -200,7 +203,7 @@ fn upstream_tools_for(profile: &str, local_names: &[&str]) -> Vec<(Arc<Upstream>
     out
 }
 
-fn upstream_owning(name: &str, profile: &str) -> Option<Arc<Upstream>> {
+pub(crate) fn upstream_owning(name: &str, profile: &str) -> Option<Arc<Upstream>> {
     if !upstream_tool_allowed(name, profile) {
         return None;
     }
@@ -215,7 +218,7 @@ fn upstream_owning(name: &str, profile: &str) -> Option<Arc<Upstream>> {
 // answer(): MCP JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
-fn answer(text: &str, profile: &str) -> Option<String> {
+pub(crate) fn answer(text: &str, profile: &str) -> Option<String> {
     let req: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return None,
@@ -253,9 +256,9 @@ fn answer(text: &str, profile: &str) -> Option<String> {
     Some(response.to_string())
 }
 
-const LOCAL_TOOL_NAMES: &[&str] = &["sys_info", "screenshot", "bash", "mouse", "key"];
+pub(crate) const LOCAL_TOOL_NAMES: &[&str] = &["sys_info", "screenshot", "bash", "mouse", "key"];
 
-fn tool_list(profile: &str) -> Value {
+pub(crate) fn tool_list(profile: &str) -> Value {
     let sys_info = json!({
         "name": "sys_info",
         "description": "Report OS, CPU, memory, architecture and hostname of this node.",
@@ -338,7 +341,7 @@ fn tool_list(profile: &str) -> Value {
     Value::Array(tools)
 }
 
-fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String)> {
+pub(crate) fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())

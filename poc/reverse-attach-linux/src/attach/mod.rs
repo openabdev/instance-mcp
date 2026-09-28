@@ -13,35 +13,35 @@ pub mod client;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct GrantInfo {
-    id: String,
-    runtime: String,
-    session: String,
-    profile: String,
-    principal: String,
-    state: String,
-    ended: Option<String>,
-    expires_at_epoch_secs: u64,
-    cancelled: Arc<AtomicBool>,
+pub(crate) struct GrantInfo {
+    pub(crate) id: String,
+    pub(crate) runtime: String,
+    pub(crate) session: String,
+    pub(crate) profile: String,
+    pub(crate) principal: String,
+    pub(crate) state: String,
+    pub(crate) ended: Option<String>,
+    pub(crate) expires_at_epoch_secs: u64,
+    pub(crate) cancelled: Arc<AtomicBool>,
 }
 
-type Registry = Arc<Mutex<HashMap<String, GrantInfo>>>;
+pub(crate) type Registry = Arc<Mutex<HashMap<String, GrantInfo>>>;
 
-static GRANT_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub(crate) static GRANT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn now_epoch_secs() -> u64 {
+pub(crate) fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn new_grant_id() -> String {
+pub(crate) fn new_grant_id() -> String {
     let n = GRANT_COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("grant-{}-{}", now_epoch_secs(), n)
 }
 
-fn set_state(registry: &Registry, grant_id: &str, state: &str) {
+pub(crate) fn set_state(registry: &Registry, grant_id: &str, state: &str) {
     if let Ok(mut map) = registry.lock() {
         if let Some(g) = map.get_mut(grant_id) {
             g.state = state.to_string();
@@ -50,7 +50,7 @@ fn set_state(registry: &Registry, grant_id: &str, state: &str) {
     }
 }
 
-fn set_ended(registry: &Registry, grant_id: &str, reason: &str) {
+pub(crate) fn set_ended(registry: &Registry, grant_id: &str, reason: &str) {
     if let Ok(mut map) = registry.lock() {
         if let Some(g) = map.get_mut(grant_id) {
             g.state = "ended".to_string();
@@ -62,7 +62,7 @@ fn set_ended(registry: &Registry, grant_id: &str, reason: &str) {
 /// Exact Swift `MacGrant` shape consumed by OpenAB Connect/Remote. Fields not
 /// present in the early PoC (`runtime`, `principal`, standard `id`/state) made a
 /// successful POST decode as a generic client parse failure.
-fn grant_json(g: &GrantInfo) -> Value {
+pub(crate) fn grant_json(g: &GrantInfo) -> Value {
     let mut out = json!({
         "id": g.id,
         "runtime": g.runtime,
@@ -82,7 +82,7 @@ fn grant_json(g: &GrantInfo) -> Value {
 // Validation helpers
 // ---------------------------------------------------------------------------
 
-fn valid_session(s: &str) -> bool {
+pub(crate) fn valid_session(s: &str) -> bool {
     // ^[a-z0-9-]{1,32}$
     let len = s.len();
     if !(1..=32).contains(&len) {
@@ -92,11 +92,11 @@ fn valid_session(s: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn strip_trailing_slashes(s: &str) -> &str {
+pub(crate) fn strip_trailing_slashes(s: &str) -> &str {
     s.trim_end_matches('/')
 }
 
-fn attach_url(runtime: &str, session: &str) -> String {
+pub(crate) fn attach_url(runtime: &str, session: &str) -> String {
     format!(
         "{}/tools/attach/{}",
         strip_trailing_slashes(runtime),
@@ -108,12 +108,12 @@ fn attach_url(runtime: &str, session: &str) -> String {
 // Disposition state machine
 // ---------------------------------------------------------------------------
 
-enum Disposition {
+pub(crate) enum Disposition {
     Stop(String),
     Redial,
 }
 
-fn disposition_close(code: u16) -> Disposition {
+pub(crate) fn disposition_close(code: u16) -> Disposition {
     match code {
         4001 => Disposition::Stop("grant_expired".to_string()),
         4002 => Disposition::Stop("replaced".to_string()),
@@ -123,7 +123,7 @@ fn disposition_close(code: u16) -> Disposition {
     }
 }
 
-fn disposition_handshake(status: u16) -> Disposition {
+pub(crate) fn disposition_handshake(status: u16) -> Disposition {
     match status {
         101 => Disposition::Redial,
         200..=299 => Disposition::Redial,

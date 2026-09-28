@@ -5,10 +5,10 @@ pub mod input;
 pub mod screen;
 pub mod sysinfo;
 
-pub use bash::tool_bash;
-pub use input::{tool_key, tool_mouse};
-pub use screen::tool_screenshot;
-pub use sysinfo::tool_sys_info;
+pub(crate) use bash::tool_bash;
+pub(crate) use input::{tool_key, tool_mouse};
+pub(crate) use screen::tool_screenshot;
+pub(crate) use sysinfo::tool_sys_info;
 
 use serde_json::{json, Value};
 
