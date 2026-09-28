@@ -232,7 +232,6 @@ sequenceDiagram
     Note over N,R: close 4010 / DELETE /attach/{id} → stop · 1000 → redial with backoff
 ```
 
-
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' $U/attach \
   -d '{"runtime":"ws://<pod-tailnet-ip>:8090","session":"<name>","profile":"sandbox",
