@@ -63,7 +63,6 @@ fn grim_command(scale: f64, format: &str, quality: i64) -> Command {
     cmd
 }
 
-
 impl Desktop for Wlroots {
     fn display_ok(&self) -> bool {
         grim_command(0.05, "png", 80)

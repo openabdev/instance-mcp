@@ -119,11 +119,18 @@ fn read_event(r: &mut impl Read) -> std::io::Result<Event> {
     let word = u32::from_le_bytes(head[4..8].try_into().unwrap());
     let size = (word >> 16) as usize;
     if size < 8 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short wayland message"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "short wayland message",
+        ));
     }
     let mut body = vec![0u8; size - 8];
     r.read_exact(&mut body)?;
-    Ok(Event { object, opcode: (word & 0xffff) as u16, body })
+    Ok(Event {
+        object,
+        opcode: (word & 0xffff) as u16,
+        body,
+    })
 }
 
 /// Cursor over an event body.
@@ -175,7 +182,12 @@ pub(crate) fn layout_box(outputs: &[OutputInfo]) -> Option<(i32, i32, u32, u32)>
         .filter(|o| o.width > 0 && o.height > 0)
         .map(|o| {
             let s = o.scale.max(1);
-            (o.x, o.y, o.x + (o.width + s - 1) / s, o.y + (o.height + s - 1) / s)
+            (
+                o.x,
+                o.y,
+                o.x + (o.width + s - 1) / s,
+                o.y + (o.height + s - 1) / s,
+            )
         })
         .collect();
     let min_x = logical.iter().map(|l| l.0).min()?;
@@ -189,8 +201,12 @@ pub(crate) fn layout_box(outputs: &[OutputInfo]) -> Option<(i32, i32, u32, u32)>
 /// inside the layout.
 pub(crate) fn absolute(x: f64, y: f64, layout: (i32, i32, u32, u32)) -> (u32, u32, u32, u32) {
     let (ox, oy, w, h) = layout;
-    let cx = (x - ox as f64).round().clamp(0.0, w.saturating_sub(1) as f64) as u32;
-    let cy = (y - oy as f64).round().clamp(0.0, h.saturating_sub(1) as f64) as u32;
+    let cx = (x - ox as f64)
+        .round()
+        .clamp(0.0, w.saturating_sub(1) as f64) as u32;
+    let cy = (y - oy as f64)
+        .round()
+        .clamp(0.0, h.saturating_sub(1) as f64) as u32;
     (cx, cy, w, h)
 }
 
@@ -209,8 +225,8 @@ struct Pointer {
 impl Pointer {
     fn connect() -> Result<Pointer, DesktopError> {
         let path = wayland_socket();
-        let mut sock = UnixStream::connect(&path)
-            .map_err(|e| format!("wayland {}: {e}", path.display()))?;
+        let mut sock =
+            UnixStream::connect(&path).map_err(|e| format!("wayland {}: {e}", path.display()))?;
         sock.set_read_timeout(Some(Duration::from_secs(3))).ok();
 
         let mut next = 3u32;
@@ -220,7 +236,8 @@ impl Pointer {
             id
         };
         let send = |sock: &mut UnixStream, bytes: Vec<u8>| {
-            sock.write_all(&bytes).map_err(|e| format!("wayland write: {e}"))
+            sock.write_all(&bytes)
+                .map_err(|e| format!("wayland write: {e}"))
         };
 
         // Registry, then a sync to know when the global list is complete.
@@ -249,19 +266,39 @@ impl Pointer {
             }
         }
         let (mname, _) = manager.ok_or_else(|| {
-            "compositor has no zwlr_virtual_pointer_manager_v1 (wlroots virtual-pointer)".to_string()
+            "compositor has no zwlr_virtual_pointer_manager_v1 (wlroots virtual-pointer)"
+                .to_string()
         })?;
 
         let mgr = alloc();
         send(
             &mut sock,
-            Msg::new().u32(mname).str("zwlr_virtual_pointer_manager_v1").u32(1).u32(mgr).encode(REGISTRY, 0),
+            Msg::new()
+                .u32(mname)
+                .str("zwlr_virtual_pointer_manager_v1")
+                .u32(1)
+                .u32(mgr)
+                .encode(REGISTRY, 0),
         )?;
         let mut outputs: Vec<(u32, OutputInfo)> = Vec::new();
         for (name, ver) in &output_names {
             let id = alloc();
-            send(&mut sock, Msg::new().u32(*name).str("wl_output").u32((*ver).min(2)).u32(id).encode(REGISTRY, 0))?;
-            outputs.push((id, OutputInfo { scale: 1, ..Default::default() }));
+            send(
+                &mut sock,
+                Msg::new()
+                    .u32(*name)
+                    .str("wl_output")
+                    .u32((*ver).min(2))
+                    .u32(id)
+                    .encode(REGISTRY, 0),
+            )?;
+            outputs.push((
+                id,
+                OutputInfo {
+                    scale: 1,
+                    ..Default::default()
+                },
+            ));
         }
         let id = alloc();
         // create_virtual_pointer(seat = null → the default seat, id)
@@ -305,12 +342,15 @@ impl Pointer {
             }
         }
         let infos: Vec<OutputInfo> = outputs.iter().map(|(_, o)| *o).collect();
-        let layout = layout_box(&infos).ok_or_else(|| "compositor reports no outputs".to_string())?;
+        let layout =
+            layout_box(&infos).ok_or_else(|| "compositor reports no outputs".to_string())?;
 
         // Drain whatever the compositor sends from now on (output changes, delete_id) so its
         // buffer never fills; EOF or a protocol error marks the device dead → reconnect.
         let dead = Arc::new(AtomicBool::new(false));
-        let mut reader = sock.try_clone().map_err(|e| format!("wayland clone: {e}"))?;
+        let mut reader = sock
+            .try_clone()
+            .map_err(|e| format!("wayland clone: {e}"))?;
         reader.set_read_timeout(None).ok();
         let flag = dead.clone();
         thread::spawn(move || loop {
@@ -330,7 +370,12 @@ impl Pointer {
 
         eprintln!("seat: virtual pointer up, layout {layout:?}");
         thread::sleep(SETTLE);
-        Ok(Pointer { sock, id, layout, dead })
+        Ok(Pointer {
+            sock,
+            id,
+            layout,
+            dead,
+        })
     }
 
     fn send(&mut self, frames: &[Vec<u8>]) -> Result<(), DesktopError> {
@@ -338,7 +383,9 @@ impl Pointer {
         for f in frames {
             all.extend_from_slice(f);
         }
-        self.sock.write_all(&all).map_err(|e| format!("wayland write: {e}"))
+        self.sock
+            .write_all(&all)
+            .map_err(|e| format!("wayland write: {e}"))
     }
 
     fn frame(&self) -> Vec<u8> {
@@ -349,7 +396,11 @@ impl Pointer {
 fn display_error(body: &[u8]) -> String {
     let mut a = Args::new(body);
     let (_obj, code, msg) = (a.u32(), a.u32(), a.str());
-    format!("wayland protocol error {}: {}", code.unwrap_or(0), msg.unwrap_or_default())
+    format!(
+        "wayland protocol error {}: {}",
+        code.unwrap_or(0),
+        msg.unwrap_or_default()
+    )
 }
 
 fn pointer_slot() -> &'static Mutex<Option<Pointer>> {
@@ -387,7 +438,13 @@ fn button_code(b: Button) -> u32 {
 pub fn pointer_goto(x: f64, y: f64) -> Result<(), DesktopError> {
     with_pointer(|p| {
         let (ax, ay, w, h) = absolute(x, y, p.layout);
-        let motion = Msg::new().u32(now_ms()).u32(ax).u32(ay).u32(w).u32(h).encode(p.id, 1);
+        let motion = Msg::new()
+            .u32(now_ms())
+            .u32(ax)
+            .u32(ay)
+            .u32(w)
+            .u32(h)
+            .encode(p.id, 1);
         let frame = p.frame();
         p.send(&[motion, frame])
     })
@@ -395,7 +452,11 @@ pub fn pointer_goto(x: f64, y: f64) -> Result<(), DesktopError> {
 
 pub fn pointer_move_rel(dx: f64, dy: f64) -> Result<(), DesktopError> {
     with_pointer(|p| {
-        let motion = Msg::new().u32(now_ms()).u32(fixed(dx)).u32(fixed(dy)).encode(p.id, 0);
+        let motion = Msg::new()
+            .u32(now_ms())
+            .u32(fixed(dx))
+            .u32(fixed(dy))
+            .encode(p.id, 0);
         let frame = p.frame();
         p.send(&[motion, frame])
     })
@@ -403,7 +464,11 @@ pub fn pointer_move_rel(dx: f64, dy: f64) -> Result<(), DesktopError> {
 
 fn button(b: Button, pressed: bool) -> Result<(), DesktopError> {
     with_pointer(|p| {
-        let ev = Msg::new().u32(now_ms()).u32(button_code(b)).u32(pressed as u32).encode(p.id, 2);
+        let ev = Msg::new()
+            .u32(now_ms())
+            .u32(button_code(b))
+            .u32(pressed as u32)
+            .encode(p.id, 2);
         let frame = p.frame();
         p.send(&[ev, frame])
     })
@@ -482,7 +547,9 @@ pub fn ensure_keyboard(mut seat_command: impl FnMut(&str) -> Command) -> Result<
             Ok(())
         });
     }
-    let child = cmd.spawn().map_err(|e| format!("wtype keyboard anchor: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("wtype keyboard anchor: {e}"))?;
     eprintln!("seat: virtual keyboard anchor up (pid {})", child.id());
     *slot = Some(child);
     drop(slot);
@@ -524,7 +591,10 @@ mod tests {
         let b = Msg::new().u32(7).encode(9, 3);
         assert_eq!(b.len(), 12);
         assert_eq!(u32::from_le_bytes(b[0..4].try_into().unwrap()), 9);
-        assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), (12 << 16) | 3);
+        assert_eq!(
+            u32::from_le_bytes(b[4..8].try_into().unwrap()),
+            (12 << 16) | 3
+        );
     }
 
     #[test]
@@ -539,7 +609,11 @@ mod tests {
 
     #[test]
     fn events_round_trip_through_the_reader() {
-        let bytes = Msg::new().u32(5).str("zwlr_virtual_pointer_manager_v1").u32(2).encode(2, 0);
+        let bytes = Msg::new()
+            .u32(5)
+            .str("zwlr_virtual_pointer_manager_v1")
+            .u32(2)
+            .encode(2, 0);
         let ev = read_event(&mut &bytes[..]).unwrap();
         assert_eq!((ev.object, ev.opcode), (2, 0));
         let mut a = Args::new(&ev.body);
@@ -556,13 +630,37 @@ mod tests {
 
     #[test]
     fn layout_is_the_union_of_logical_outputs() {
-        let black = [OutputInfo { x: 0, y: 0, width: 1920, height: 1080, scale: 1 }];
+        let black = [OutputInfo {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1,
+        }];
         assert_eq!(layout_box(&black), Some((0, 0, 1920, 1080)));
-        let hidpi = [OutputInfo { x: 0, y: 0, width: 2880, height: 1800, scale: 2 }];
+        let hidpi = [OutputInfo {
+            x: 0,
+            y: 0,
+            width: 2880,
+            height: 1800,
+            scale: 2,
+        }];
         assert_eq!(layout_box(&hidpi), Some((0, 0, 1440, 900)));
         let two = [
-            OutputInfo { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
-            OutputInfo { x: 1920, y: 0, width: 1280, height: 1024, scale: 1 },
+            OutputInfo {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                scale: 1,
+            },
+            OutputInfo {
+                x: 1920,
+                y: 0,
+                width: 1280,
+                height: 1024,
+                scale: 1,
+            },
         ];
         assert_eq!(layout_box(&two), Some((0, 0, 3200, 1080)));
         assert_eq!(layout_box(&[]), None);
@@ -574,6 +672,9 @@ mod tests {
         assert_eq!(absolute(1246.0, 198.0, l), (1246, 198, 1920, 1080));
         assert_eq!(absolute(-50.0, 5000.0, l), (0, 1079, 1920, 1080));
         // A layout whose origin is not 0,0.
-        assert_eq!(absolute(100.0, 100.0, (-1920, 0, 3840, 1080)), (2020, 100, 3840, 1080));
+        assert_eq!(
+            absolute(100.0, 100.0, (-1920, 0, 3840, 1080)),
+            (2020, 100, 3840, 1080)
+        );
     }
 }
