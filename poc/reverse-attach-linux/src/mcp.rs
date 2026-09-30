@@ -185,11 +185,54 @@ pub(crate) fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
 /// Local tools `observe` may call: look, never act (instance-mcp#45).
 pub(crate) const OBSERVE_TOOLS: &[&str] = &["sys_info", "screenshot"];
 
+/// What a tool can do, as far as a boundary is concerned (same classes as the
+/// Swift `ToolProfile.ToolClass`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolClass {
+    /// Reads only; changes nothing.
+    Observe,
+    /// Changes state, but cannot run code as the desktop user.
+    #[allow(dead_code)]
+    Act,
+    /// Reaches the desktop user's shell, directly or by driving the GUI.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Shell,
+}
+
+/// Every local tool, classified. Exhaustive by test: a tool in `LOCAL_TOOL_NAMES`
+/// (or served by `tool_list`) without an entry here fails `profile_tests`, so a new
+/// tool cannot pass the boundary check just by not being listed as dangerous.
+pub(crate) const LOCAL_TOOL_CLASS: &[(&str, ToolClass)] = &[
+    ("sys_info", ToolClass::Observe),
+    ("screenshot", ToolClass::Observe),
+    ("bash", ToolClass::Shell),
+    ("mouse", ToolClass::Shell), // can open a terminal
+    ("key", ToolClass::Shell),   // can type into one
+];
+
+pub(crate) fn local_tool_class(name: &str) -> Option<ToolClass> {
+    LOCAL_TOOL_CLASS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+}
+
+/// Whether a profile honestly grants the node user's shell (instance-mcp#45).
+#[cfg(test)]
+pub(crate) fn profile_is_shell_equivalent(profile: &str) -> bool {
+    matches!(normalize_profile(profile), Some("owner") | Some("desktop"))
+}
+
 /// Whether a local tool is visible/callable under `profile`.
 pub(crate) fn local_tool_allowed(name: &str, profile: &str) -> bool {
     match normalize_profile(profile) {
         Some("owner") | Some("desktop") => true,
-        Some("observe") => OBSERVE_TOOLS.contains(&name),
+        // Both: on the allowlist *and* classified as observation. A tool added to the
+        // allowlist by mistake is still refused unless it was also classified as
+        // changing nothing.
+        Some("observe") => {
+            OBSERVE_TOOLS.contains(&name) && local_tool_class(name) == Some(ToolClass::Observe)
+        }
         _ => false,
     }
 }
@@ -431,6 +474,72 @@ mod profile_tests {
             assert!(upstream_tool_allowed(tool, "owner"), "{tool}");
         }
         assert!(upstream_tool_allowed("browser_navigate", "desktop"));
+    }
+
+    /// Local tool names as actually served under `profile` (no upstream in tests).
+    fn served(profile: &str) -> Vec<String> {
+        tool_list(profile)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .filter(|n| !n.starts_with("browser_"))
+            .collect()
+    }
+
+    #[test]
+    fn every_served_tool_is_classified_and_the_lists_agree() {
+        let served = served("owner");
+        let mut sorted_served = served.clone();
+        sorted_served.sort();
+        let mut names: Vec<String> = LOCAL_TOOL_NAMES.iter().map(|s| s.to_string()).collect();
+        names.sort();
+        assert_eq!(
+            sorted_served, names,
+            "tool_list and LOCAL_TOOL_NAMES disagree"
+        );
+        let unclassified: Vec<_> = served
+            .iter()
+            .filter(|n| local_tool_class(n).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "classify in LOCAL_TOOL_CLASS: {unclassified:?}"
+        );
+        let stale: Vec<_> = LOCAL_TOOL_CLASS
+            .iter()
+            .filter(|(n, _)| !served.iter().any(|s| s == n))
+            .collect();
+        assert!(stale.is_empty(), "classified but not served: {stale:?}");
+    }
+
+    #[test]
+    fn no_profile_claims_to_be_narrower_than_it_is() {
+        for profile in ["owner", "desktop", "observe"] {
+            let shell: Vec<String> = served(profile)
+                .into_iter()
+                .filter(|n| local_tool_class(n) == Some(ToolClass::Shell))
+                .collect();
+            if profile_is_shell_equivalent(profile) {
+                assert!(
+                    !shell.is_empty(),
+                    "{profile} is marked shell-equivalent; keep it honest"
+                );
+            } else {
+                assert!(
+                    shell.is_empty(),
+                    "{profile} claims no shell but serves {shell:?}"
+                );
+                let acting: Vec<String> = served(profile)
+                    .into_iter()
+                    .filter(|n| local_tool_class(n) != Some(ToolClass::Observe))
+                    .collect();
+                assert!(
+                    acting.is_empty(),
+                    "{profile} serves tools that act: {acting:?}"
+                );
+            }
+        }
     }
 
     #[test]

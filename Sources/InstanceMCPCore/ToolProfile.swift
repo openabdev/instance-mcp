@@ -44,9 +44,39 @@ public enum ToolProfile: String, Codable, Sendable, CaseIterable {
     /// upstream — is denied under `observe` until it is listed here.
     public static let observeTools: Set<String> = ["sys_info", "screenshot"]
 
-    /// Local tools that reach a shell as the desktop user, directly or by driving
-    /// the GUI. Any profile with `isShellEquivalent == false` must allow none.
-    public static let shellCapableTools: Set<String> = ["osascript", "key", "mouse"]
+    /// What a tool can do, as far as a boundary is concerned.
+    public enum ToolClass: String, Sendable, CaseIterable {
+        /// Reads only; changes nothing.
+        case observe
+        /// Changes state, but cannot run code as the desktop user.
+        case act
+        /// Reaches the desktop user's shell, directly or by driving the GUI.
+        case shell
+    }
+
+    /// Every local tool, classified. **Exhaustive by test**: a tool in
+    /// `ToolCatalog.local` without an entry here fails `ProfileBoundaryTests`,
+    /// so a new tool cannot slip past the boundary check by simply not being
+    /// listed as dangerous. Classify conservatively: if it can open, type into,
+    /// or script anything that runs code, it is `.shell`.
+    public static let localToolClass: [String: ToolClass] = [
+        "sys_info": .observe,
+        "screenshot": .observe,
+        "exec_poll": .observe,     // reads a job's state and output; starts nothing
+        "exec_list": .observe,
+        "exec_cancel": .act,       // signals a job's process group
+        "exec": .shell,
+        "exec_start": .shell,
+        "osascript": .shell,       // `do shell script`, JXA, NSTask
+        "key": .shell,             // can type into a terminal
+        "mouse": .shell,           // can open one
+    ]
+
+    /// Local tools that reach a shell as the desktop user. Any profile with
+    /// `isShellEquivalent == false` must allow none.
+    public static var shellCapableTools: Set<String> {
+        Set(localToolClass.filter { $0.value == .shell }.keys)
+    }
 
     /// Match is on the tool name.
     public func allows(_ toolName: String) -> Bool {
@@ -57,7 +87,9 @@ public enum ToolProfile: String, Codable, Sendable, CaseIterable {
             if toolName.hasPrefix("browser_") { return Self.desktopBrowserTools.contains(toolName) }
             return true
         case .observe:
-            return Self.observeTools.contains(toolName)
+            // Both: on the allowlist *and* classified as observation, so a tool added
+            // to the allowlist by mistake is still refused unless it changes nothing.
+            return Self.observeTools.contains(toolName) && Self.localToolClass[toolName] == .observe
         }
     }
 
