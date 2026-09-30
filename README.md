@@ -150,7 +150,8 @@ sandboxed agent never gets `/mcp`; it gets a **reverse attach** with the `deskto
 
 ## Lending this Mac to a sandboxed agent (reverse attach)
 
-An agent in an `openab-pty` session cannot reach this Mac — the pod has no egress by design. So
+An agent in an `openab-pty` session cannot reach this Mac — the pod has no tailnet egress by design
+(it does reach the internet, for its model API, git and package registries). So
 **this Mac dials the pod** and serves MCP over that socket with a narrowed tool list. Design:
 [`docs/adr/reverse-attach.md`](docs/adr/reverse-attach.md); wire contract: openab-pty
 `CLIENT-CONTRACT.md` §9.
