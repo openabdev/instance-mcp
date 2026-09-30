@@ -17,8 +17,10 @@ a profile is a managed policy, a grant attaches it to a principal (the session),
 > `exec*`, but that takes away a convenient entry point, not a privilege
 > ([#45](https://github.com/openabdev/instance-mcp/issues/45)). When you grant full control, lend
 > a **dedicated computer** (a Linux hands node, a throwaway machine or VM), not the one you work
-> on. `ProfileBoundaryTests` fails any profile that claims to be narrower than a shell while
-> allowing a shell-capable tool.
+> on. Every served tool is classified `observe` (reads only), `act` (changes state) or `shell`
+> (reaches the desktop user's shell); the boundary tests fail on any **unclassified** tool, on any
+> profile that claims to be narrower than a shell while allowing a `shell` tool, and on `observe`
+> holding anything but `observe` tools (macOS `ProfileBoundaryTests`, Linux `profile_tests`).
 
 ## 1. Available profiles
 
@@ -97,8 +99,15 @@ network the computer reaches, localhost and the tailnet included.
 | Screen | `screenshot` |
 
 This is an allowlist. Any tool added later, local or upstream (browser), is denied under
-`observe` until it is added to `ToolProfile.observeTools` (Linux: `OBSERVE_TOOLS`). A screenshot
-still discloses whatever is on screen, but the agent cannot change anything.
+`observe` until it is added to `ToolProfile.observeTools` (Linux: `OBSERVE_TOOLS`) **and**
+classified `observe`. A screenshot still discloses whatever is on screen, but the agent cannot
+change anything.
+
+**`observe` protects the computer, not the agent.** Every screenshot goes into the agent's
+context. If the screen shows a hostile page or message, its text can act as a prompt injection
+against the agent — which cannot act on this computer under `observe`, but still has its own shell
+in the pod, its model API, and whatever credentials the session holds (for example git). Treat what
+is on screen as untrusted input to the agent.
 
 ## 3. What each profile loses against the previous one
 
