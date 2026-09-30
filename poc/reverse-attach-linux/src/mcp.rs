@@ -174,7 +174,24 @@ pub(crate) const DESKTOP_BROWSER_TOOLS: &[&str] = &[
 ];
 
 pub(crate) fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
-    normalize_profile(profile) != Some("desktop") || DESKTOP_BROWSER_TOOLS.contains(&name)
+    match normalize_profile(profile) {
+        Some("owner") => true,
+        Some("desktop") => DESKTOP_BROWSER_TOOLS.contains(&name),
+        // observe: look only; no upstream (browser) tool is an observation of this node.
+        _ => false,
+    }
+}
+
+/// Local tools `observe` may call: look, never act (instance-mcp#45).
+pub(crate) const OBSERVE_TOOLS: &[&str] = &["sys_info", "screenshot"];
+
+/// Whether a local tool is visible/callable under `profile`.
+pub(crate) fn local_tool_allowed(name: &str, profile: &str) -> bool {
+    match normalize_profile(profile) {
+        Some("owner") | Some("desktop") => true,
+        Some("observe") => OBSERVE_TOOLS.contains(&name),
+        _ => false,
+    }
 }
 
 /// `owner` | `desktop`; `sandbox` is the pre-rename name of `desktop` (instance-mcp#45)
@@ -183,6 +200,7 @@ pub(crate) fn normalize_profile(profile: &str) -> Option<&'static str> {
     match profile {
         "owner" => Some("owner"),
         "desktop" | "sandbox" => Some("desktop"),
+        "observe" => Some("observe"),
         _ => None,
     }
 }
@@ -342,11 +360,14 @@ pub(crate) fn tool_list(profile: &str) -> Value {
         }
     });
 
-    // Both profiles get every local tool, `bash` included. `desktop` is not a boundary on
-    // any platform (instance-mcp#45): mouse and keyboard reach a terminal, so hiding `bash`
-    // would remove a convenience, not a privilege. Only the browser subset differs.
-    let _ = profile;
-    let mut tools = vec![sys_info, screenshot, bash, mouse, key];
+    // owner and desktop get every local tool, `bash` included: `desktop` is not a boundary
+    // on any platform (instance-mcp#45) — mouse and keyboard reach a terminal, so hiding
+    // `bash` would remove a convenience, not a privilege. `observe` is the real boundary:
+    // sys_info + screenshot only.
+    let mut tools: Vec<Value> = vec![sys_info, screenshot, bash, mouse, key]
+        .into_iter()
+        .filter(|t| local_tool_allowed(t["name"].as_str().unwrap_or_default(), profile))
+        .collect();
     for (_, t) in upstream_tools_for(profile, LOCAL_TOOL_NAMES) {
         tools.push(t);
     }
@@ -360,13 +381,15 @@ pub(crate) fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (
         .ok_or_else(|| (-32602, "missing tool name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
+    // A tool hidden from this profile's list is unknown here too, indistinguishable
+    // from one that never existed (same rule as the Swift `scoped(to:)`).
+    if LOCAL_TOOL_NAMES.contains(&name) && !local_tool_allowed(name, profile) {
+        return Err((-32601, format!("unknown tool: {name}")));
+    }
     match name {
         "sys_info" => Ok(tool_result(tool_sys_info())),
         "screenshot" => tool_screenshot(&arguments),
-        "bash" => {
-            let _ = profile;
-            tool_bash(&arguments)
-        }
+        "bash" => tool_bash(&arguments),
         "mouse" => tool_mouse(&arguments),
         "key" => tool_key(&arguments),
         other => match upstream_owning(other, profile) {
@@ -393,7 +416,8 @@ mod profile_tests {
         assert_eq!(normalize_profile("desktop"), Some("desktop"));
         assert_eq!(normalize_profile("sandbox"), Some("desktop"));
         assert_eq!(normalize_profile("Sandbox"), None);
-        assert_eq!(normalize_profile("observe"), None);
+        assert_eq!(normalize_profile("observe"), Some("observe"));
+        assert_eq!(normalize_profile("browser"), None);
     }
 
     #[test]
@@ -404,5 +428,27 @@ mod profile_tests {
             assert!(upstream_tool_allowed(tool, "owner"), "{tool}");
         }
         assert!(upstream_tool_allowed("browser_navigate", "desktop"));
+    }
+
+    #[test]
+    fn observe_can_only_look() {
+        for tool in ["sys_info", "screenshot"] {
+            assert!(local_tool_allowed(tool, "observe"), "{tool}");
+        }
+        for tool in ["bash", "mouse", "key", "something_new"] {
+            assert!(!local_tool_allowed(tool, "observe"), "{tool}");
+        }
+        for tool in [
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_take_screenshot",
+        ] {
+            assert!(!upstream_tool_allowed(tool, "observe"), "{tool}");
+        }
+        assert!(local_tool_allowed("bash", "desktop"));
+        assert!(
+            !local_tool_allowed("bash", "nonsense"),
+            "unknown profiles get nothing"
+        );
     }
 }

@@ -173,7 +173,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 - **`/attach` uses the same `AuthPolicy` as `/mcp`** — the human's tailnet login + bearer. The grant
   lives on this Mac; the phone can be put away after the tap.
 - **Profiles** are per grant and fixed for its life: `owner` = every tool; `desktop` = every tool
-  except `exec*` (`sandbox` is its old name and still accepted). Under `desktop`, `tools/list`
+  except `exec*` (`sandbox` is its old name and still accepted); `observe` = `sys_info` +
+  `screenshot` only. Full per-profile tool lists and diffs: [`docs/tool-profiles.md`](docs/tool-profiles.md). Under `desktop`, `tools/list`
   omits `exec*` and a forced `tools/call exec` is an *unknown tool* error. Widening is a new grant.
 - ⚠️ **Neither profile is a security boundary** ([#45](https://github.com/openabdev/instance-mcp/issues/45)).
   GUI control is a shell: `osascript` runs `do shell script`, `key` types into a terminal, `mouse`

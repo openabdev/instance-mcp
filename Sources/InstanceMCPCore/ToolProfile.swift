@@ -17,16 +17,23 @@ import Foundation
 /// cannot reach a shell — `ToolProfileTests` enforces that for every profile that
 /// does not declare itself `isShellEquivalent`.
 ///
+/// `observe` is the first profile that *is* a boundary: `sys_info` and
+/// `screenshot` only. The agent can see the screen (which still discloses what is
+/// on it) but cannot change anything, so it is not shell-equivalent.
+///
 /// Wire and persisted value was `sandbox`; it is still accepted and means `desktop`.
+/// Full per-profile tool lists: `docs/tool-profiles.md`.
 public enum ToolProfile: String, Codable, Sendable, CaseIterable {
     case owner
     case desktop
+    case observe
 
     /// Accepts the pre-rename `sandbox` so existing clients and stored grants work.
     public init?(rawValue: String) {
         switch rawValue {
         case "owner": self = .owner
         case "desktop", "sandbox": self = .desktop
+        case "observe": self = .observe
         default: return nil
         }
     }
@@ -35,17 +42,23 @@ public enum ToolProfile: String, Codable, Sendable, CaseIterable {
         switch self {
         case .owner: return "owner"
         case .desktop: return "desktop"
+        case .observe: return "observe"
         }
     }
 
     /// Whether this profile grants (directly or through GUI control) the desktop
-    /// user's shell. True for both profiles today; a future `observe` / `browser`
-    /// profile must be false and is tested to contain no shell-capable tool.
+    /// user's shell. `observe` is not, and `ProfileBoundaryTests` holds it to that:
+    /// it must allow no shell-capable tool.
     public var isShellEquivalent: Bool {
         switch self {
         case .owner, .desktop: return true
+        case .observe: return false
         }
     }
+
+    /// Everything `observe` may call. An allowlist, so a new tool — local or
+    /// upstream — is denied under `observe` until it is listed here.
+    public static let observeTools: Set<String> = ["sys_info", "screenshot"]
 
     /// Local tools that reach a shell as the desktop user, directly or by driving
     /// the GUI. Any profile with `isShellEquivalent == false` must allow none.
@@ -59,6 +72,8 @@ public enum ToolProfile: String, Codable, Sendable, CaseIterable {
             if toolName.hasPrefix("exec") { return false }
             if toolName.hasPrefix("browser_") { return Self.desktopBrowserTools.contains(toolName) }
             return true
+        case .observe:
+            return Self.observeTools.contains(toolName)
         }
     }
 

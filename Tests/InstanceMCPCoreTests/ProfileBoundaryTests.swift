@@ -59,6 +59,16 @@ final class ProfileBoundaryTests: XCTestCase {
         XCTAssertFalse(ToolProfile.desktop.allows("exec"))
     }
 
+    /// `observe` is the one real boundary today: look, never act.
+    func testObserveCanOnlyLook() throws {
+        XCTAssertFalse(ToolProfile.observe.isShellEquivalent)
+        let shipped = try shippedLocalToolNames()
+        XCTAssertEqual(Set(shipped.filter(ToolProfile.observe.allows)), ["sys_info", "screenshot"])
+        for tool in ["browser_navigate", "browser_snapshot", "browser_take_screenshot", "browser_something_new", "exec", "osascript"] {
+            XCTAssertFalse(ToolProfile.observe.allows(tool), "\(tool) is an action, or unknown")
+        }
+    }
+
     func testNoAllowedBrowserToolRunsArbitraryCode() {
         for tool in ["browser_evaluate", "browser_run_code_unsafe"] {
             XCTAssertFalse(ToolProfile.desktopBrowserTools.contains(tool))
@@ -71,7 +81,9 @@ final class ProfileBoundaryTests: XCTestCase {
         XCTAssertEqual(ToolProfile(rawValue: "sandbox"), .desktop)
         XCTAssertEqual(ToolProfile(rawValue: "desktop"), .desktop)
         XCTAssertEqual(ToolProfile(rawValue: "owner"), .owner)
-        XCTAssertNil(ToolProfile(rawValue: "observe"), "unknown profiles must not widen to anything")
+        XCTAssertEqual(ToolProfile(rawValue: "observe"), .observe)
+        XCTAssertNil(ToolProfile(rawValue: "browser"), "unknown profiles must not widen to anything")
+        XCTAssertNil(ToolProfile(rawValue: "Observe"))
         XCTAssertEqual(ToolProfile.desktop.rawValue, "desktop")
         let decoded = try JSONDecoder().decode([ToolProfile].self, from: Data(#"["sandbox","desktop","owner"]"#.utf8))
         XCTAssertEqual(decoded, [.desktop, .desktop, .owner])

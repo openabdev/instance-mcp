@@ -221,6 +221,15 @@ public actor AttachManager {
     // MARK: helpers
 
     static func desktopInstructions(profile: ToolProfile, base: String?) -> String? {
+        if profile == .observe {
+            let head = base.map { $0 + "\n\n" } ?? ""
+            return head + """
+                You reached this computer through OpenAB Connect under the `observe` profile: a human lets \
+                you look, not act. Only `sys_info` and `screenshot` are available — you cannot click, type \
+                or run anything here. If the task needs input on this computer, ask the human to grant \
+                the `desktop` profile instead.
+                """
+        }
         guard profile == .desktop else { return base }
         let head = base.map { $0 + "\n\n" } ?? ""
         return head + """
