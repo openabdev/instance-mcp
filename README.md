@@ -146,7 +146,7 @@ Configured checks are **AND**-combined: a request must pass every check that is 
 - `/healthz` is unauthenticated and says only `ok`.
 
 Trust model: `exec` is a full shell as the logged-in user. `/mcp` is "my CLI on my Mac". A
-sandboxed agent never gets `/mcp`; it gets a **reverse attach** with the `sandbox` profile (below).
+sandboxed agent never gets `/mcp`; it gets a **reverse attach** with the `desktop` profile (below).
 
 ## Lending this Mac to a sandboxed agent (reverse attach)
 
@@ -161,10 +161,10 @@ An agent in an `openab-pty` session cannot reach this Mac — the pod has no egr
 ```
 
 ```sh
-# "lend my Mac to session laptop for an hour, sandbox profile"; the Mac mints the attach
+# "lend my Mac to session laptop for an hour, desktop profile"; the Mac mints the attach
 # secret at the runtime with its admin credential (used once, not stored) and dials in.
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"runtime":"ws://100.111.174.31:8090","session":"laptop","profile":"sandbox",
+  -d '{"runtime":"ws://100.111.174.31:8090","session":"laptop","profile":"desktop",
        "ttl_secs":3600,"admin_credential":"<openab-pty admin credential>"}' \
   https://macmini.<tailnet>.ts.net:8444/attach
 # → 202 {"id":"…","state":"idle"|"attached",…}      GET /attach lists · DELETE /attach/{id} revokes
@@ -172,9 +172,22 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 
 - **`/attach` uses the same `AuthPolicy` as `/mcp`** — the human's tailnet login + bearer. The grant
   lives on this Mac; the phone can be put away after the tap.
-- **Profiles** are per grant and fixed for its life: `owner` = every tool; `sandbox` = no `exec*`
-  (the agent already has a shell in its sandbox). Under `sandbox`, `tools/list` omits them and a
-  forced `tools/call exec` is an *unknown tool* error. Widening is a new grant.
+- **Profiles** are per grant and fixed for its life: `owner` = every tool; `desktop` = every tool
+  except `exec*`; `observe` = `sys_info` + `screenshot` only. Any other value is a 400, including
+  the removed name `sandbox`. Hidden tools are absent from `tools/list`, and a forced
+  `tools/call` is an *unknown tool* error. Widening is a new grant. Full per-profile tool lists
+  and diffs: [`docs/tool-profiles.md`](docs/tool-profiles.md).
+- ⚠️ **Neither profile is a security boundary** ([#45](https://github.com/openabdev/instance-mcp/issues/45)).
+  GUI control is a shell: `osascript` runs `do shell script`, `key` types into a terminal, `mouse`
+  opens one. Removing `exec*` removes a convenient entry point, **not a privilege** — lending a
+  computer under `desktop` hands the agent the desktop user's shell for the whole lease, and the
+  browser tools run with this computer's logged-in browser profile and network (localhost and
+  tailnet included). Filtering AppleScript text cannot fix this (JXA `doShellScript`,
+  `ObjC.import` → `NSTask`, Terminal `do script`, System Events keystrokes). When an agent needs
+  full control, **lend a dedicated computer** — a Linux hands node or a throwaway machine/VM —
+  not the one you work on. Restricted, genuinely narrower tiers (`observe`, `browser` with a
+  throwaway profile) are planned in #45; `ProfileBoundaryTests` fails any profile that claims to
+  be narrower while still allowing a shell-capable tool.
 - Either `secret` (already minted by the operator at the runtime) or `admin_credential` (the Mac
   mints, TTL is the runtime's) — exactly one. A new grant for the same runtime+session replaces the
   old one; that is renewal. `ttl_secs` is forwarded all the way to the runtime (not just held by
@@ -193,17 +206,18 @@ The sandbox has no path to any browser, so browser control is served **from this
 LaunchAgent from [`poc/pw-mcp`](poc/pw-mcp/README.md) is installed) the daemon re-serves
 Playwright's tools under its own `tools/list`, filtered by the connection's profile:
 
-- `owner` sees all 32 `browser_*` tools; `sandbox` sees the navigate / read / interact subset
-  (`ToolProfile.sandboxBrowserTools`) and **not** `browser_run_code_unsafe`, file upload / PDF,
-  network inspection, raw mouse-by-coordinate, dialogs, `browser_close`. New Playwright tools are
-  denied under sandbox until listed.
+- `owner` sees all 32 `browser_*` tools; `desktop` sees the navigate / read / interact subset
+  (`ToolProfile.desktopBrowserTools`) and **not** `browser_evaluate` / `browser_run_code_unsafe`
+  (arbitrary JavaScript), file upload / PDF, network inspection, raw mouse-by-coordinate, dialogs,
+  `browser_close`. New Playwright tools are denied under `desktop` until listed. This narrows the
+  browser *tools*, not the browser: it is this computer's persistent profile, with its cookies.
 - `browser_navigate` + `browser_snapshot` returns the page as an accessibility tree — the first
   video title on a channel page is one text line, no screenshot, no OCR. The browser is a real
   window on this Mac's desktop, so Connect's Screens pane shows what the agent is doing.
 - Upstream down → its tools are absent from `tools/list`; everything else works. The upstream's
   `Mcp-Session-Id` is re-established automatically. Local tool names win on collision.
 
-Verified 2026-09-26 from a lent pod session (sandbox): 16 `browser_*` tools listed, `run_code_unsafe`
+Verified 2026-09-26 from a lent pod session (then `sandbox`, now `desktop`; 15 since `browser_evaluate` was removed in #45): 16 `browser_*` tools listed, `run_code_unsafe`
 unknown, navigate → snapshot on a YouTube channel returned the first video's title as text.
 
 Verified 2026-09-26 end to end on macmini against the openab-pty runtime (PR #38): mint via

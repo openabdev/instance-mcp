@@ -27,7 +27,7 @@ func fullServer() -> MCPServer {
 
 final class ToolProfileTests: XCTestCase {
     func testSandboxDropsEveryExecTool() async {
-        let scoped = fullServer().scoped(to: .sandbox)
+        let scoped = fullServer().scoped(to: .desktop)
         XCTAssertEqual(scoped.toolNames, ["echo", "screenshot"])
         let list = await scoped.handle(try! JSONCoding.decoder.decode(JSONRPCRequest.self, from: rpc("tools/list")))
         let names = list?.result?["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue }
@@ -39,7 +39,7 @@ final class ToolProfileTests: XCTestCase {
     }
 
     func testCallingAnOmittedToolLooksLikeAnUnknownTool() async {
-        let scoped = fullServer().scoped(to: .sandbox)
+        let scoped = fullServer().scoped(to: .desktop)
         let call = await scoped.handle(try! JSONCoding.decoder.decode(JSONRPCRequest.self,
             from: rpc("tools/call", params: ["name": "exec", "arguments": ["command": "id"]])))
         XCTAssertEqual(call?.error?.code, JSONRPCError.invalidParams)
@@ -51,10 +51,10 @@ final class ToolProfileTests: XCTestCase {
     }
 
     func testScopedCanCarryItsOwnInstructions() async {
-        let scoped = fullServer().scoped(to: .sandbox, instructions: "sandboxed")
+        let scoped = fullServer().scoped(to: .desktop, instructions: "sandboxed")
         let init_ = await scoped.handle(try! JSONCoding.decoder.decode(JSONRPCRequest.self, from: rpc("initialize")))
         XCTAssertEqual(init_?.result?["instructions"]?.stringValue, "sandboxed")
-        XCTAssertEqual(fullServer().scoped(to: .sandbox).instructions, "base")
+        XCTAssertEqual(fullServer().scoped(to: .desktop).instructions, "base")
     }
 }
 
@@ -83,7 +83,7 @@ final class ReverseAttachPolicyTests: XCTestCase {
 
     func testAttachURLIsBuiltFromTheRuntimeBase() {
         let c = ReverseAttachClient.Config(runtime: URL(string: "ws://100.1.2.3:8090")!, session: "laptop",
-                                           secret: "s", profile: .sandbox, deadline: .distantFuture)
+                                           secret: "s", profile: .desktop, deadline: .distantFuture)
         XCTAssertEqual(c.attachURL.absoluteString, "ws://100.1.2.3:8090/tools/attach/laptop")
         let tls = ReverseAttachClient.Config(runtime: URL(string: "wss://pod.tail.ts.net/")!, session: "x",
                                              secret: "s", profile: .owner, deadline: .distantFuture)
@@ -94,8 +94,8 @@ final class ReverseAttachPolicyTests: XCTestCase {
     /// and sessions: the grant *is* the auth, no header on the socket is trusted.
     func testFrameAnsweringMatchesDispatch() async {
         let c = ReverseAttachClient.Config(runtime: URL(string: "ws://h:1")!, session: "s", secret: "x",
-                                           profile: .sandbox, deadline: .distantFuture)
-        let client = ReverseAttachClient(config: c, server: fullServer().scoped(to: .sandbox))
+                                           profile: .desktop, deadline: .distantFuture)
+        let client = ReverseAttachClient(config: c, server: fullServer().scoped(to: .desktop))
         let list = await client.answer(String(decoding: rpc("tools/list", id: 7), as: UTF8.self))
         let parsed = decodeJSON(Data(list!.utf8))
         XCTAssertEqual(parsed["id"]?.intValue, 7)
@@ -162,7 +162,7 @@ final class AttachEndpointTests: XCTestCase {
         XCTAssertEqual(r.status, 202, String(decoding: r.body, as: UTF8.self))
         let g = decodeJSON(r.body)
         let id = g["id"]!.stringValue!
-        XCTAssertEqual(g["profile"]?.stringValue, "sandbox")
+        XCTAssertEqual(g["profile"]?.stringValue, "desktop", "the default profile, reported under its honest name")
         XCTAssertEqual(g["principal"]?.stringValue, "a@b")
         XCTAssertEqual(g["session"]?.stringValue, "laptop")
 
@@ -337,8 +337,8 @@ final class ReverseAttachEndToEndTests: XCTestCase {
         defer { runtime.stop() }
         let states = StateSink()
         let cfg = ReverseAttachClient.Config(runtime: URL(string: "ws://127.0.0.1:\(runtime.port)")!, session: "laptop",
-                                             secret: "s3", profile: .sandbox, deadline: Date().addingTimeInterval(30))
-        let client = ReverseAttachClient(config: cfg, server: fullServer().scoped(to: .sandbox),
+                                             secret: "s3", profile: .desktop, deadline: Date().addingTimeInterval(30))
+        let client = ReverseAttachClient(config: cfg, server: fullServer().scoped(to: .desktop),
                                          onStateChange: { states.push($0) })
         await client.start()
 
@@ -383,7 +383,7 @@ final class ReverseAttachEndToEndTests: XCTestCase {
         // (A real 401 is exercised by openab-pty's own suite; here we prove the
         // client does not spin: it backs off and stops at the deadline.)
         var cfg = ReverseAttachClient.Config(runtime: URL(string: "ws://127.0.0.1:1")!, session: "x",
-                                             secret: "s", profile: .sandbox, deadline: Date().addingTimeInterval(1.2))
+                                             secret: "s", profile: .desktop, deadline: Date().addingTimeInterval(1.2))
         cfg.initialBackoff = 0.3
         let states = StateSink()
         let client = ReverseAttachClient(config: cfg, server: fullServer(), onStateChange: { states.push($0) })

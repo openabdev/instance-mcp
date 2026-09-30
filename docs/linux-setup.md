@@ -268,7 +268,7 @@ sequenceDiagram
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' $U/attach \
-  -d '{"runtime":"ws://<pod-tailnet-ip>:8090","session":"<name>","profile":"sandbox",
+  -d '{"runtime":"ws://<pod-tailnet-ip>:8090","session":"<name>","profile":"desktop",
        "ttl_secs":3600,"admin_credential":"<openab-pty admin credential>"}'
 # → 202 {"id":"grant-…","state":"idle",…}; GET $U/attach lists, DELETE $U/attach/<id> revokes
 ```

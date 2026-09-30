@@ -158,7 +158,7 @@ public actor AttachManager {
     @discardableResult
     private func startClient(_ grant: Grant, secret: String) async -> Grant {
         let id = grant.id
-        let instructions = Self.sandboxInstructions(profile: grant.profile, base: baseServer.instructions)
+        let instructions = Self.desktopInstructions(profile: grant.profile, base: baseServer.instructions)
         let scoped = baseServer.scoped(to: grant.profile, instructions: instructions)
         let config = ReverseAttachClient.Config(runtime: grant.runtime, session: grant.session, secret: secret,
                                                 profile: grant.profile, deadline: grant.expiresAt)
@@ -220,13 +220,22 @@ public actor AttachManager {
 
     // MARK: helpers
 
-    static func sandboxInstructions(profile: ToolProfile, base: String?) -> String? {
-        guard profile == .sandbox else { return base }
+    static func desktopInstructions(profile: ToolProfile, base: String?) -> String? {
+        if profile == .observe {
+            let head = base.map { $0 + "\n\n" } ?? ""
+            return head + """
+                You reached this computer through OpenAB Connect under the `observe` profile: a human lets \
+                you look, not act. Only `sys_info` and `screenshot` are available — you cannot click, type \
+                or run anything here. If the task needs input on this computer, ask the human to grant \
+                the `desktop` profile instead.
+                """
+        }
+        guard profile == .desktop else { return base }
         let head = base.map { $0 + "\n\n" } ?? ""
         return head + """
             You reached this Mac through OpenAB Connect: a human lent it to your sandbox session for a \
-            limited time and is likely watching the screen. This is the `sandbox` profile — there is no \
-            `exec` tool here (you already have a shell in your own session); drive the Mac through \
+            limited time and is likely watching the screen. This is the `desktop` profile — there is no \
+            `exec` tool here (prefer the shell in your own session for local work); drive the Mac through \
             `screenshot`, `mouse`, `key` and `osascript`, and — when `browser_*` tools are listed — through \
             the browser directly: `browser_navigate` then `browser_snapshot` gives you the page as text, \
             no screenshot needed. If a tool starts failing with "not attached", the grant ended; ask the \

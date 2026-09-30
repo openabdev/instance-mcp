@@ -15,7 +15,7 @@ comment states "nothing here is a secret — auth is the caller's Tailscale iden
 
 ### Threat: a leaked tailnet credential is sufficient
 
-`Tailscale-User-Login` reflects the **登入身份 of the connecting node**, authenticated by the
+`Tailscale-User-Login` reflects the **login identity of the connecting node**, authenticated by the
 Tailscale control plane and un-spoofable by the HTTP client (`tailscale serve` overwrites any
 client-supplied header — verified). But that identity is only as strong as tailnet
 enrolment:

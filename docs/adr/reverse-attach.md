@@ -51,8 +51,17 @@ why we start from the opposite premise.
    and multiplexes requests over the reverse socket by JSON-RPC `id`. The CLI's `mcp.json`
    points at a plain local URL — no token, no TLS, no proxy; its HTTP stack is irrelevant.
 4. **The Mac chooses the tool profile per attach.** The Mac *is* the MCP server, so scoping is
-   a per-connection tool list in `MCPServer` (`owner` = everything, `sandbox` = no `exec*`).
-   No MCP parsing in a proxy.
+   a per-connection tool list in `MCPServer` (`owner` = everything, `desktop` = no `exec*`;
+   originally named `sandbox`, a name since removed and refused). No MCP parsing in a proxy.
+   **Amended 2026-09-30 ([#45](https://github.com/openabdev/instance-mcp/issues/45)):** a tool
+   list over one desktop session is not a privilege boundary. `osascript` (`do shell script`),
+   `key` and `mouse` each reach the desktop user's shell, so `desktop` is shell-equivalent and the
+   earlier rationale — "no `exec` because the agent already has a shell" — described a
+   convenience, not a restriction. The profile was renamed to say so; the pod-side isolation (no
+   egress, credential-less shell) is unaffected and remains the boundary this ADR claims. A real
+   narrower tier must be built from tools that cannot reach a shell (`observe`: `sys_info` +
+   `screenshot`; `browser`: Playwright with a per-grant throwaway profile), and the hands
+   themselves are isolated only by lending a dedicated machine or VM.
 5. **The human decides which pod the Mac dials**, from OpenAB Connect (Mac) **or OpenAB Remote
    (iPhone)**: pick a PTY session → "lend my Mac to this agent" with profile + TTL → the client
    calls `POST /attach {runtime, session, profile, ttl}` on `oab-instance-mcp` with the human's
@@ -114,8 +123,8 @@ Verified on the real hop (Mac → pod inbound → loopback mux → CLI), never M
 - From inside the shell, with no `*_PROXY` set: `curl http://127.0.0.1:<port>/healthz` succeeds
   while attached.
 - One `sys_info` and one streaming call round-trip end to end.
-- `tools/list` under the `sandbox` profile contains no `exec*`; a forced `tools/call exec` is
-  rejected.
+- `tools/list` under the `desktop` profile contains no `exec*`; a forced `tools/call exec` is
+  rejected. (This verifies the filter, not a boundary — see decision 4's amendment.)
 - Deleting the attach verifier (or TTL expiry) closes the socket; the CLI's next call fails
   cleanly and `tools/list` reports "not attached" rather than an error.
 - From inside the shell, `curl` to any other tailnet node **fails** — the property this

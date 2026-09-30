@@ -41,7 +41,7 @@ func usage() -> Never {
       --upstream <name=url>  Re-serve the tools of a loopback MCP server (e.g. the Playwright MCP
                       at browser=http://127.0.0.1:8794/mcp) under this daemon, subject to the
                       connection's tool profile. Repeatable. Tools appear with the upstream's
-                      own names; sandbox sees an allowlisted subset of browser_*.
+                      own names; desktop sees an allowlisted subset of browser_*, observe none.
       --no-attach     Disable the reverse-attach plane (POST/GET /attach, DELETE /attach/{id}):
                       the human-credentialed endpoint through which Connect / Remote lends this
                       Mac to one openab-pty session (this Mac dials the pod; see the ADR).

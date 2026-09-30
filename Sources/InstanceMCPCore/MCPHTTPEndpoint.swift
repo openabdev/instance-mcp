@@ -112,7 +112,7 @@ extension MCPHTTPEndpoint {
             guard let session = body["session"]?.stringValue else {
                 return .json(400, JSONValue.object(["error": "session is required"]))
             }
-            let profileStr = body["profile"]?.stringValue ?? ToolProfile.sandbox.rawValue
+            let profileStr = body["profile"]?.stringValue ?? ToolProfile.desktop.rawValue
             guard let profile = ToolProfile(rawValue: profileStr) else {
                 return .json(400, JSONValue.object(["error": .string("profile must be one of \(ToolProfile.allCases.map(\.rawValue))")]))
             }
