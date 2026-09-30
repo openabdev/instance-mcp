@@ -17,10 +17,12 @@ a profile is a managed policy, a grant attaches it to a principal (the session),
 > `exec*`, but that takes away a convenient entry point, not a privilege
 > ([#45](https://github.com/openabdev/instance-mcp/issues/45)). When you grant full control, lend
 > a **dedicated computer** (a Linux hands node, a throwaway machine or VM), not the one you work
-> on. Every served tool is classified `observe` (reads only), `act` (changes state) or `shell`
-> (reaches the desktop user's shell); the boundary tests fail on any **unclassified** tool, on any
+> on. Every **local** tool is classified `observe` (reads only), `act` (changes state) or `shell`
+> (reaches the desktop user's shell); the boundary tests fail on any **unclassified** local tool, on any
 > profile that claims to be narrower than a shell while allowing a `shell` tool, and on `observe`
 > holding anything but `observe` tools (macOS `ProfileBoundaryTests`, Linux `profile_tests`).
+> Upstream `browser_*` tools are governed by their own allowlist (`desktop` gets 15, `observe`
+> none) and are not in that classification yet; they must be before a `browser` tier ships.
 
 ## 1. Available profiles
 
@@ -106,8 +108,10 @@ change anything.
 **`observe` protects the computer, not the agent.** Every screenshot goes into the agent's
 context. If the screen shows a hostile page or message, its text can act as a prompt injection
 against the agent — which cannot act on this computer under `observe`, but still has its own shell
-in the pod, its model API, and whatever credentials the session holds (for example git). Treat what
-is on screen as untrusted input to the agent.
+in the pod, whatever credentials the session holds (for example git), and **outbound internet
+access by default**: it can send whatever it reads to any host. Treat what is on screen as
+untrusted input to the agent; deployments that need to contain this should give the pod an egress
+allowlist (model API, git remotes, package registries).
 
 ## 3. What each profile loses against the previous one
 

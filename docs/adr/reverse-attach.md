@@ -15,7 +15,9 @@ Connect.
 Three facts about the sandbox constrain the answer:
 
 1. The shell runs as `uid 1000` with no host credentials and a read-only rootfs. openab-pty's
-   standing invariant is that **the shell never holds a credential**.
+   standing invariant is that **the shell holds no host or cloud credential**. (It is not
+   credential-free: the agent CLI's own model login lives in the container, and a session may
+   carry others, such as git.)
 2. The tailscale sidecar is the pod's only tailnet identity and it is **inbound-only**:
    tailnet → sidecar → loopback runtime, via `tailscale serve`.
 3. The sidecar runs `--tun=userspace-networking` on both k8s and ECS. There is no tun device,
@@ -38,7 +40,12 @@ why we start from the opposite premise.
 
 ## Decision
 
-**The sandbox gets no egress at all. The Mac dials the pod.**
+**The sandbox gets no tailnet egress. The Mac dials the pod.**
+
+"Egress" in this ADR means **tailnet** egress. The pod's ordinary internet egress is open by
+default — the agent CLI needs it for its model API, git remotes and package registries, and the
+ECS tasks run with `assignPublicIp: true`. Restricting it is a deployment choice (an egress
+allowlist), not something this design provides.
 
 1. **openab-pty runtime** gains an inbound endpoint `WS /tools/attach` on its existing loopback
    listener, reached through the sidecar's existing `tailscale serve` exactly like
@@ -58,7 +65,8 @@ why we start from the opposite premise.
    `key` and `mouse` each reach the desktop user's shell, so `desktop` is shell-equivalent and the
    earlier rationale — "no `exec` because the agent already has a shell" — described a
    convenience, not a restriction. The profile was renamed to say so; the pod-side isolation (no
-   egress, credential-less shell) is unaffected and remains the boundary this ADR claims. A real
+   tailnet egress — internet egress is open by default — and a shell without host credentials)
+   is unaffected and remains the boundary this ADR claims. A real
    narrower tier must be built from tools that cannot reach a shell (`observe`: `sys_info` +
    `screenshot`; `browser`: Playwright with a per-grant throwaway profile), and the hands
    themselves are isolated only by lending a dedicated machine or VM.

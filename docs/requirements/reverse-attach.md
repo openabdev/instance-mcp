@@ -1,4 +1,4 @@
-# Requirement — reverse attach: macmini dials the sandbox, the sandbox has no egress
+# Requirement — reverse attach: macmini dials the sandbox, the sandbox has no tailnet egress
 
 > Recorded 2026-09-24. Implements **Phase 4** of
 > [`connect-closed-loop.md`](connect-closed-loop.md): "Connect's agent (in the `openab-pty`
@@ -14,8 +14,8 @@ key / osascript / exec) so the agent can drive the Mac while the human watches i
 The sandbox shell has **no network identity of its own** (`uid 1000`, no host creds, read-only
 rootfs); the tailscale sidecar is the pod's only tailnet identity and it is **inbound-only**
 (tailnet → sidecar → loopback runtime). Every earlier idea started from "give the sandbox an
-egress path". This document starts from the opposite premise: **the sandbox gets no egress at
-all — macmini connects *in*.**
+egress path". This document starts from the opposite premise: **the sandbox gets no tailnet
+egress — macmini connects *in*.** (Internet egress is a separate matter and is open by default.)
 
 ## Rejected — every egress-based variant shares one root flaw
 
@@ -66,7 +66,7 @@ on the instance-mcp side.
   │                  │ (sha256 verifier)│    │ inbound  │  └────────────────────────┘  │
   │                  └──────────────────┘    │  only    └──────────────────────────────┘
   │   sidecar: inbound only — UNCHANGED      │                       ▲
-  │   no egress of any kind                  │                       │ "lend my Mac to this
+  │   no tailnet egress (internet: default)  │                       │ "lend my Mac to this
   └──────────────────────────────────────────┘                       │  session, 1h" — human,
                                                                      │  in OpenAB Connect
 ```
@@ -196,8 +196,8 @@ remainder of the grant TTL.
 |---|---|
 | sandbox needs a tailnet egress path | **none needed**; sidecar unchanged |
 | credential in the pod that a compromised shell could steal | **none** — pod holds a sha256 verifier only; a verifier cannot be used to connect anywhere |
-| compromised agent reaches other tailnet nodes | **impossible** — no egress to bypass through |
-| compromised agent uses macmini's full shell via `exec` | **blocked by profile** — the `sandbox` profile omits `exec`, or requires a human tap in Connect (the human is already watching the screen) |
+| compromised agent reaches other tailnet nodes | **no path**, provided the k8s node itself does not run `tailscaled` (otherwise apply openab-pty `networkpolicy-no-tailnet-egress.yaml`). The pod still reaches the internet by default |
+| compromised agent uses macmini's full shell via `exec` | **not blocked by removing `exec`.** Superseded (#45): GUI control is a shell, so `desktop` (formerly `sandbox`) is shell-equivalent; only `observe` is a boundary. See `docs/tool-profiles.md` |
 | compromised agent calls the tools it *was* granted | **residual, by design** — giving an agent hands carries this in every design; the difference is the hands are exactly as large as the human chose, for as long as they chose |
 | macmini's attach credential leaks | attacker could serve a fake `/tools/attach`? No — the credential authenticates macmini *to the pod*; a leaked one lets an attacker impersonate macmini to that pod, not reach macmini. Mint per-attach, TTL'd, revoke by deleting the verifier |
 | **the k8s node itself is a tailnet member** (homelab k3s boxes often are) | **out of scope, must be documented as an assumption** — pods ride the node's tailscale routing (`ip rule … lookup 52` → `tailscale0`, masqueraded as the node) and reach every tailnet peer regardless of the sidecar. Measured on p1 in 4a: with the host's tailscaled running the shell reached macmini/black over their tailnet IPs; with it stopped, no path at all. Deployment rule: **no tailscaled on the node**; if unavoidable, an egress `NetworkPolicy` denying `100.64.0.0/10` + `fd7a:115c:a1e0::/48`. Fargate has no such path |
