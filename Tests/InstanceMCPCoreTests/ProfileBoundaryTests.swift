@@ -76,17 +76,18 @@ final class ProfileBoundaryTests: XCTestCase {
         }
     }
 
-    /// Renamed on the wire from `sandbox`; old clients and persisted grants must keep working.
-    func testSandboxIsAcceptedAsTheOldNameOfDesktop() throws {
-        XCTAssertEqual(ToolProfile(rawValue: "sandbox"), .desktop)
+    /// `sandbox` promised a boundary that does not exist; it is refused, not aliased.
+    func testTheOldSandboxNameIsRefused() throws {
+        XCTAssertNil(ToolProfile(rawValue: "sandbox"))
         XCTAssertEqual(ToolProfile(rawValue: "desktop"), .desktop)
         XCTAssertEqual(ToolProfile(rawValue: "owner"), .owner)
         XCTAssertEqual(ToolProfile(rawValue: "observe"), .observe)
         XCTAssertNil(ToolProfile(rawValue: "browser"), "unknown profiles must not widen to anything")
         XCTAssertNil(ToolProfile(rawValue: "Observe"))
         XCTAssertEqual(ToolProfile.desktop.rawValue, "desktop")
-        let decoded = try JSONDecoder().decode([ToolProfile].self, from: Data(#"["sandbox","desktop","owner"]"#.utf8))
-        XCTAssertEqual(decoded, [.desktop, .desktop, .owner])
+        let decoded = try JSONDecoder().decode([ToolProfile].self, from: Data(#"["observe","desktop","owner"]"#.utf8))
+        XCTAssertEqual(decoded, [.observe, .desktop, .owner])
+        XCTAssertThrowsError(try JSONDecoder().decode([ToolProfile].self, from: Data(#"["sandbox"]"#.utf8)))
         XCTAssertEqual(String(decoding: try JSONEncoder().encode(ToolProfile.desktop), as: UTF8.self), #""desktop""#)
     }
 }

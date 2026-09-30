@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn grants_stored_under_the_old_profile_name_resume_as_desktop() {
+    fn grants_stored_under_the_old_sandbox_name_are_dropped() {
         let now = 1_000;
         let text = format!(
             r#"{{"version":1,"grants":[
@@ -314,11 +314,9 @@ mod tests {
         );
         let grants = parse(&text, now).unwrap();
         let ids: Vec<&str> = grants.iter().map(|g| g.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["old"],
-            "an unknown profile is dropped, never widened"
+        assert!(
+            ids.is_empty(),
+            "sandbox and unknown profiles are dropped, never widened: {ids:?}"
         );
-        assert_eq!(grants[0].profile, "desktop");
     }
 }

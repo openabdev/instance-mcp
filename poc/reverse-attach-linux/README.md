@@ -47,7 +47,7 @@ bash smoke.sh                  # RESULT: 36 passed, 0 failed
 | control contract | `POST /attach` 202 with every Connect-required grant field; `GET /attach` wrapper; `GET /attach/{id}`; `DELETE` 204 + removal; principal and dynamic expiry |
 | redial / stop | close `1000` → redialed after 1 s; close `4010` → `state=ended, ended=revoked`; wrong secret → `ended=handshake_rejected_401` with exactly one attempt; unreachable runtime → `ended=deadline` |
 | MCP | `serverInfo.name=instance-mcp-rpi`; owner list = `sys_info,screenshot,exec`; `sys_info.hostname=rpi1`; `exec` ran on the node; unknown tool / method → `-32601`; notification silent; ping → pong |
-| desktop (was sandbox) | list = `sys_info,screenshot`; forced `exec` → error, not executed (2026-09-28 run, before `bash` joined both profiles) |
+| desktop | list = `sys_info,screenshot`; forced `exec` → error, not executed (2026-09-28 run, before `bash` joined both profiles) |
 | close handshake | client echoes the Close frame (was a bare EOF before the `socket.flush()` fix in `dial_loop`) |
 
 ## Direct `/mcp` for OpenAB Connect's Screens pane (added 2026-09-28)
@@ -94,7 +94,7 @@ re-serves its tools under its own `tools/list`, filtered by the connection's pro
   SSE or JSON replies, `tools/list` cached 30 s (failures not cached), upstream down → its
   tools absent. Local names win on collision.
 - Profile filter is the verbatim Swift `ToolProfile.desktopBrowserTools` list (15 tools).
-  `owner` sees all 32; `desktop` (old name `sandbox`, still accepted) never sees `evaluate`,
+  `owner` sees all 32; `desktop` never sees `evaluate`,
   `run_code_unsafe`, upload, pdf, network, raw
   mouse-by-coordinate, dialogs, `browser_close`, or any new upstream tool.
 - Chromium managed policy `/etc/chromium/policies/managed/oab-instance-mcp.json` blocks
@@ -102,7 +102,7 @@ re-serves its tools under its own `tools/list`, filtered by the connection's pro
   "Allow app to use the Camera?" dialog, which nothing but `mouse` could dismiss.
 
 Verified on rpi1: owner `/mcp` → 37 tools (5 local + 32 browser); after a pw-mcp restart the
-next call re-initializes and still lists 37. Lent to `kiro-1040` session `mac` (sandbox):
+next call re-initializes and still lists 37. Lent to `kiro-1040` session `mac` (then named `sandbox`, now `desktop`):
 22 tools = 5 local + 16 browser + `instance_status`; forced `browser_run_code_unsafe` →
 `-32601 unknown tool`; `browser_navigate` example.com 13 s (Pi 4 class, first page), then
 `browser_snapshot` → `heading "Example Domain"`, `link "Learn more"`. The Chromium window is

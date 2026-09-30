@@ -22,7 +22,7 @@ final class GrantPersistenceTests: XCTestCase {
     }
 
     private func grant(_ id: String, expiresIn: TimeInterval) -> PersistedGrant {
-        PersistedGrant(id: id, runtime: URL(string: "ws://127.0.0.1:9")!, session: "s", profile: "sandbox",
+        PersistedGrant(id: id, runtime: URL(string: "ws://127.0.0.1:9")!, session: "s", profile: "desktop",
                        principal: "a@b", createdAt: Date(), expiresAt: Date().addingTimeInterval(expiresIn),
                        secret: "secret-\(id)")
     }
@@ -134,6 +134,21 @@ final class GrantPersistenceTests: XCTestCase {
         XCTAssertEqual(secrets.accounts, [new.id])
         XCTAssertNil(secrets.get(account: old.id))
         await mgr.revoke(new.id)
+    }
+
+    /// instance-mcp#45: `sandbox` is refused, not aliased. A grant stored under it by an
+    /// older build ends at resume instead of coming back under any profile.
+    func testAGrantStoredUnderTheOldSandboxNameIsDropped() async throws {
+        let secrets = InMemorySecretStore()
+        let old = PersistedGrant(id: "old-sandbox", runtime: URL(string: "ws://127.0.0.1:9")!, session: "s",
+                                 profile: "sandbox", principal: "a@b", createdAt: Date(),
+                                 expiresAt: Date().addingTimeInterval(600), secret: "secret-old")
+        store(secrets).save([old])
+        let mgr = AttachManager(server: fullServer(), store: store(secrets))
+        let resumed = await mgr.resume()
+        XCTAssertEqual(resumed, 0)
+        let remaining = await mgr.list()
+        XCTAssertTrue(remaining.isEmpty)
     }
 
     func testWithoutAStoreNothingIsPersisted() async throws {

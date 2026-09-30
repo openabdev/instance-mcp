@@ -114,7 +114,7 @@ extension MCPHTTPEndpoint {
             }
             let profileStr = body["profile"]?.stringValue ?? ToolProfile.desktop.rawValue
             guard let profile = ToolProfile(rawValue: profileStr) else {
-                return .json(400, JSONValue.object(["error": .string("profile must be one of \(ToolProfile.allCases.map(\.rawValue)) (sandbox = desktop)")]))
+                return .json(400, JSONValue.object(["error": .string("profile must be one of \(ToolProfile.allCases.map(\.rawValue))")]))
             }
             let ttl = TimeInterval(body["ttl_secs"]?.intValue ?? Int(AttachManager.defaultTTL))
             let request = AttachManager.Request(runtime: runtime, session: session, profile: profile, ttl: ttl,

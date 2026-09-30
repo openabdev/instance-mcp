@@ -21,11 +21,14 @@
 
 ## 1. 目前可用的 profiles
 
-| Profile | 舊名 / 別名 | 等同 shell? | macOS 工具數 | Linux 工具數 | 用途 |
-|---|---|---|---|---|---|
-| `owner` | — | 是（直接） | 42 | 37 | 電腦主人自己的 CLI；全部工具 |
-| `desktop` | `sandbox`（仍接受，一律視為 `desktop`） | **是**（透過 GUI） | 20 | 20 | 讓 agent 操作桌面：看、點、打字、AppleScript、瀏覽器互動 |
-| `observe` | — | **否** | 2 | 2 | 只能看不能動：系統資訊與截圖 |
+| Profile | 等同 shell? | macOS 工具數 | Linux 工具數 | 用途 |
+|---|---|---|---|---|
+| `owner` | 是（直接） | 42 | 37 | 電腦主人自己的 CLI；全部工具 |
+| `desktop` | **是**（透過 GUI） | 20 | 20 | 讓 agent 操作桌面：看、點、打字、AppleScript、瀏覽器互動 |
+| `observe` | **否** | 2 | 2 | 只能看不能動：系統資訊與截圖 |
+
+舊名 `sandbox` **已移除且不再接受**：它暗示一個並不存在的安全邊界。送 `sandbox` 會得到
+HTTP 400，存在磁碟上、以 `sandbox` 記錄的 grant 在重新載入時會被丟棄。
 
 工具數包含瀏覽器工具（`browser_*`），前提是那台電腦有設定 Playwright upstream
 （`--upstream browser=…`；macmini、rpi1、black 都有）。沒有 upstream 時，`owner` 在 macOS
@@ -58,7 +61,7 @@
 
 Linux 沒有 `osascript`；`bash` 對應 macOS 的 `exec*`。
 
-### `desktop`（舊名 `sandbox`）
+### `desktop`
 
 **macOS — 20 個**
 
@@ -119,14 +122,14 @@ agent 比較不方便，不會降低權限，就不假裝它是限制。
 
 ## 相容性與現況
 
-- **線上值**：`owner`、`desktop`、`observe`。`sandbox` 仍然接受，視為 `desktop`；grant
-  一律以新名稱回報。
-- **OpenAB Connect / Remote**：目前 UI 只提供 Desktop 與 Owner 兩個選項，送出的值是
-  `sandbox`／`owner`，這樣舊版的 instance-mcp 才不會回 400。等所有電腦都更新到支援
-  `desktop`／`observe` 的版本後，client 才會改送新名稱，並加上 Observe 選項
-  （oablab/oab-pty-mac#76）。
-- **降版**：新版存下的 grant 會寫 `desktop` 或 `observe`。舊版 daemon 載入時會把它當成
-  未知 profile 丟棄，grant 因此結束，不會被放寬。
+- **線上值只有** `owner`、`desktop`、`observe`。其他值一律 400，包括舊名 `sandbox`。
+- **不相容變更**：client 與電腦必須一起更新。送 `sandbox` 的舊版 Connect / Remote 碰到
+  新版電腦會被拒；改送 `desktop` / `observe` 的新版 client 碰到舊版電腦也會被拒。
+  Client 端的更新在 oablab/oab-pty-mac#76。
+- **既有 grant**：舊版以 `sandbox` 存下的 grant，升級後在重新載入時會被丟棄，grant
+  因此結束，需要重新授權。
+- **降版**：新版存下的 grant 會寫 `desktop` 或 `observe`。舊版 daemon 不認得，會丟棄，
+  grant 因此結束，不會被放寬。
 
 ## 計畫中（尚未提供）
 

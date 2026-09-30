@@ -40,7 +40,9 @@ check "reject both secret+admin" "[[ '$r' == *'exactly one'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a"}')
 check "reject neither secret nor admin" "[[ '$r' == *'exactly one'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","profile":"Sandbox"}')
-check "reject unknown profile (no silent widening)" "[[ '$r' == *'profile must be owner or desktop'* ]]"
+check "reject unknown profile (no silent widening)" "[[ '$r' == *'profile must be owner, desktop or observe'* ]]"
+r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","profile":"sandbox"}')
+check "reject the old sandbox profile name (#45)" "[[ '$r' == *'profile must be owner, desktop or observe'* ]]"
 r=$($C -o /dev/null -w '%{http_code}' -X POST 127.0.0.1:8790/attach -H 'Content-Length: 99999999' -d '{}')
 check "oversized Content-Length refused before auth" "[[ '$r' == 000 || '$r' == 4* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","ttl_secs":0}')
@@ -105,19 +107,19 @@ check "unknown tool → -32601" "[[ \$(py unk) == -32601* ]]"
 check "unknown method → -32601" "[[ \$(py bogus) == -32601 ]]"
 check "ping → pong" "[[ \$(py pong) == True ]]"
 
-echo "== pre-minted secret path + sandbox profile (session pre) =="
+echo "== pre-minted secret path + desktop profile (session pre) =="
 : > $LOG
-r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"pre","profile":"sandbox","ttl_secs":30,"secret":"preminted-xyz"}')
+r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"pre","profile":"desktop","ttl_secs":30,"secret":"preminted-xyz"}')
 echo "$r"
-check "old profile name sandbox is accepted as desktop" "[[ '$r' == *'\"profile\":\"desktop\"'* ]]"
+check "grant reports profile desktop" "[[ '$r' == *'\"profile\":\"desktop\"'* ]]"
 for i in $(seq 1 20); do grep -q '"ev": "closed"' $LOG 2>/dev/null && break; sleep 0.5; done
 check "no mint call for secret path" "! grep -q '\"ev\": \"mint\"' $LOG"
-check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash,mouse,key ]]"
-check "sandbox bash ran on node" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
+check "desktop tools/list = sys_info,screenshot,bash,mouse,key" "[[ \$(py tools) == sys_info,screenshot,bash,mouse,key ]]"
+check "desktop bash ran on node" "[[ \$(py exec) == \"hands-node-$(hostname) $HOME\" ]]"
 check "no sleep leaked after timeout" "! pgrep -f 'sleep 30' >/dev/null"
-check "close frame echoed (sandbox attach)" "grep -q '\"ev\": \"close_echo\"' $LOG"
+check "close frame echoed (desktop attach)" "grep -q '\"ev\": \"close_echo\"' $LOG"
 st=$($C 127.0.0.1:8790/attach); echo "$st"
-check "sandbox grant ended/revoked (CLOSES tail=4010)" "[[ \$(echo '$st' | state_of pre) == ended && \$(echo '$st' | ended_of pre) == revoked ]]"
+check "desktop grant ended/revoked (CLOSES tail=4010)" "[[ \$(echo '$st' | state_of pre) == ended && \$(echo '$st' | ended_of pre) == revoked ]]"
 
 echo "== wrong secret → handshake 401 → stop =="
 : > $LOG
@@ -145,7 +147,7 @@ MOCK=$!
 start_ra() { BIND=127.0.0.1:8790 MCP_INSECURE_LOCAL=1 $BIN >> "$RA_LOG" 2>&1 & RA=$!; sleep 0.5; }
 attaches() { grep -c '"ev": "attach", "session": "keep", "status": 101' $LOG 2>/dev/null || echo 0; }
 start_ra
-r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"keep","profile":"sandbox","ttl_secs":120,"secret":"k1"}')
+r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"keep","profile":"desktop","ttl_secs":120,"secret":"k1"}')
 GID=$(echo "$r" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 for i in $(seq 1 20); do [[ $(attaches) -ge 1 ]] && break; sleep 0.3; done
 check "grants file written with mode 600" "[[ \$(stat -c %a \"$MCP_GRANTS_FILE\" 2>/dev/null || stat -f %Lp \"$MCP_GRANTS_FILE\") == 600 ]]"

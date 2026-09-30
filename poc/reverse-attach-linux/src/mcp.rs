@@ -194,12 +194,12 @@ pub(crate) fn local_tool_allowed(name: &str, profile: &str) -> bool {
     }
 }
 
-/// `owner` | `desktop`; `sandbox` is the pre-rename name of `desktop` (instance-mcp#45)
-/// and is still accepted from clients and stored grants. Anything else is `None`.
+/// `owner` | `desktop` | `observe`. The old name `sandbox` is refused like any unknown
+/// profile (instance-mcp#45): it promised a boundary that does not exist.
 pub(crate) fn normalize_profile(profile: &str) -> Option<&'static str> {
     match profile {
         "owner" => Some("owner"),
-        "desktop" | "sandbox" => Some("desktop"),
+        "desktop" => Some("desktop"),
         "observe" => Some("observe"),
         _ => None,
     }
@@ -411,10 +411,10 @@ mod profile_tests {
     use super::*;
 
     #[test]
-    fn sandbox_is_the_old_name_of_desktop_and_unknown_profiles_do_not_widen() {
+    fn unknown_profiles_including_the_old_sandbox_name_do_not_widen() {
         assert_eq!(normalize_profile("owner"), Some("owner"));
         assert_eq!(normalize_profile("desktop"), Some("desktop"));
-        assert_eq!(normalize_profile("sandbox"), Some("desktop"));
+        assert_eq!(normalize_profile("sandbox"), None);
         assert_eq!(normalize_profile("Sandbox"), None);
         assert_eq!(normalize_profile("observe"), Some("observe"));
         assert_eq!(normalize_profile("browser"), None);
@@ -424,7 +424,10 @@ mod profile_tests {
     fn desktop_never_gets_arbitrary_javascript() {
         for tool in ["browser_evaluate", "browser_run_code_unsafe"] {
             assert!(!upstream_tool_allowed(tool, "desktop"), "{tool}");
-            assert!(!upstream_tool_allowed(tool, "sandbox"), "{tool}");
+            assert!(
+                !upstream_tool_allowed(tool, "sandbox"),
+                "{tool}: unknown profile gets nothing"
+            );
             assert!(upstream_tool_allowed(tool, "owner"), "{tool}");
         }
         assert!(upstream_tool_allowed("browser_navigate", "desktop"));

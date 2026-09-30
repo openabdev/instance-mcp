@@ -21,30 +21,14 @@ import Foundation
 /// `screenshot` only. The agent can see the screen (which still discloses what is
 /// on it) but cannot change anything, so it is not shell-equivalent.
 ///
-/// Wire and persisted value was `sandbox`; it is still accepted and means `desktop`.
+/// The old name `sandbox` is **not** accepted: it described a boundary that does not
+/// exist, and a client still sending it has not been updated to say so to its user.
+/// It is refused (400) like any unknown profile, and a grant stored under it is dropped.
 /// Full per-profile tool lists: `docs/tool-profiles.md`.
 public enum ToolProfile: String, Codable, Sendable, CaseIterable {
     case owner
     case desktop
     case observe
-
-    /// Accepts the pre-rename `sandbox` so existing clients and stored grants work.
-    public init?(rawValue: String) {
-        switch rawValue {
-        case "owner": self = .owner
-        case "desktop", "sandbox": self = .desktop
-        case "observe": self = .observe
-        default: return nil
-        }
-    }
-
-    public var rawValue: String {
-        switch self {
-        case .owner: return "owner"
-        case .desktop: return "desktop"
-        case .observe: return "observe"
-        }
-    }
 
     /// Whether this profile grants (directly or through GUI control) the desktop
     /// user's shell. `observe` is not, and `ProfileBoundaryTests` holds it to that:

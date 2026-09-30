@@ -51,8 +51,8 @@ why we start from the opposite premise.
    and multiplexes requests over the reverse socket by JSON-RPC `id`. The CLI's `mcp.json`
    points at a plain local URL — no token, no TLS, no proxy; its HTTP stack is irrelevant.
 4. **The Mac chooses the tool profile per attach.** The Mac *is* the MCP server, so scoping is
-   a per-connection tool list in `MCPServer` (`owner` = everything, `desktop` — formerly
-   `sandbox` — = no `exec*`). No MCP parsing in a proxy.
+   a per-connection tool list in `MCPServer` (`owner` = everything, `desktop` = no `exec*`;
+   originally named `sandbox`, a name since removed and refused). No MCP parsing in a proxy.
    **Amended 2026-09-30 ([#45](https://github.com/openabdev/instance-mcp/issues/45)):** a tool
    list over one desktop session is not a privilege boundary. `osascript` (`do shell script`),
    `key` and `mouse` each reach the desktop user's shell, so `desktop` is shell-equivalent and the
