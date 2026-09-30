@@ -129,8 +129,8 @@ lipo -create /tmp/imcp-arm64/release/oab-instance-mcp \
              /tmp/imcp-x86_64/release/oab-instance-mcp \
              -output /tmp/oab-instance-mcp
 chmod +x /tmp/oab-instance-mcp
-scripts/assemble-app.sh /tmp/oab-instance-mcp /tmp/oab-instance-mcp.app 0.6.7
-ALLOW_UNSIGNED=1 scripts/package-pkg.sh /tmp/oab-instance-mcp.app /tmp/oab-instance-mcp.pkg 0.6.7
+scripts/assemble-app.sh /tmp/oab-instance-mcp /tmp/oab-instance-mcp.app 0.7.0
+ALLOW_UNSIGNED=1 scripts/package-pkg.sh /tmp/oab-instance-mcp.app /tmp/oab-instance-mcp.pkg 0.7.0
 ```
 
 Unsigned artifacts are testing inputs only; do not install or publish them.
