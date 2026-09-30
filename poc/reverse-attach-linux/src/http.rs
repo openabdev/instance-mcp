@@ -573,10 +573,15 @@ fn handle_attach(
     if !valid_session(session) {
         return bad_request(stream, "session must match ^[a-z0-9-]{1,32}$");
     }
-    // Only the two known profiles. Anything else must not silently widen to owner.
-    if profile != "owner" && profile != "sandbox" {
-        return bad_request(stream, "profile must be owner or sandbox");
-    }
+    // Only the known profiles (`sandbox` = old name of `desktop`). Anything else must
+    // not silently widen to owner.
+    let Some(profile) = crate::mcp::normalize_profile(&profile) else {
+        return bad_request(
+            stream,
+            "profile must be owner or desktop (sandbox = desktop)",
+        );
+    };
+    let profile = profile.to_string();
     if !(1..=86400).contains(&ttl_secs) {
         return bad_request(stream, "ttl_secs must be in 1..=86400");
     }

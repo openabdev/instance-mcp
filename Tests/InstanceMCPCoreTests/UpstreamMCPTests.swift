@@ -106,7 +106,7 @@ final class UpstreamMCPTests: XCTestCase {
 
     func testSandboxSeesOnlyAllowlistedBrowserToolsAndLocalNamesWin() async throws {
         let up = try FakeUpstream(); defer { up.stop() }
-        let s = makeServer(up, profile: .sandbox)
+        let s = makeServer(up, profile: .desktop)
         let list = await s.handle(try JSONCoding.decoder.decode(JSONRPCRequest.self, from: rpc("tools/list")))
         XCTAssertEqual(names(list), ["echo", "screenshot", "browser_navigate", "browser_snapshot"],
                        "no exec, no browser_run_code_unsafe, upstream 'screenshot' shadowed by the local one")
@@ -122,7 +122,7 @@ final class UpstreamMCPTests: XCTestCase {
 
     func testCallIsForwardedAndResultPassedThroughVerbatim() async throws {
         let up = try FakeUpstream(); defer { up.stop() }
-        let s = makeServer(up, profile: .sandbox)
+        let s = makeServer(up, profile: .desktop)
         let nav = await s.handle(try JSONCoding.decoder.decode(JSONRPCRequest.self,
             from: rpc("tools/call", params: ["name": "browser_navigate", "arguments": ["url": "https://x"]])))
         XCTAssertEqual(nav?.result?["content"]?.arrayValue?.first?["text"]?.stringValue, "did browser_navigate with https://x")
@@ -138,7 +138,7 @@ final class UpstreamMCPTests: XCTestCase {
 
     func testDeniedUpstreamToolIsUnknownUnderSandbox() async throws {
         let up = try FakeUpstream(); defer { up.stop() }
-        let s = makeServer(up, profile: .sandbox)
+        let s = makeServer(up, profile: .desktop)
         let r = await s.handle(try JSONCoding.decoder.decode(JSONRPCRequest.self,
             from: rpc("tools/call", params: ["name": "browser_run_code_unsafe", "arguments": [:]])))
         XCTAssertEqual(r?.error?.code, JSONRPCError.invalidParams)
@@ -148,7 +148,7 @@ final class UpstreamMCPTests: XCTestCase {
     func testUpstreamDownMeansNoBrowserToolsAndLocalStillWorks() async throws {
         let up = try FakeUpstream()
         up.stop()
-        let s = makeServer(up, profile: .sandbox)
+        let s = makeServer(up, profile: .desktop)
         let list = await s.handle(try JSONCoding.decoder.decode(JSONRPCRequest.self, from: rpc("tools/list")))
         XCTAssertEqual(names(list), ["echo", "screenshot"])
         let echo = await s.handle(try JSONCoding.decoder.decode(JSONRPCRequest.self,
@@ -180,11 +180,12 @@ final class UpstreamMCPTests: XCTestCase {
 
 final class SandboxBrowserAllowlistTests: XCTestCase {
     func testAllowlistShapesMatchTheThreatModel() {
-        let p = ToolProfile.sandbox
-        for ok in ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_evaluate", "browser_take_screenshot", "browser_tabs"] {
+        let p = ToolProfile.desktop
+        for ok in ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_take_screenshot", "browser_tabs"] {
             XCTAssertTrue(p.allows(ok), ok)
         }
-        for no in ["browser_run_code_unsafe", "browser_file_upload", "browser_pdf_save", "browser_network_requests", "browser_mouse_click_xy", "browser_close", "browser_handle_dialog", "browser_something_new"] {
+        // browser_evaluate is arbitrary JavaScript in the page, like run_code_unsafe (#45).
+        for no in ["browser_evaluate", "browser_run_code_unsafe", "browser_file_upload", "browser_pdf_save", "browser_network_requests", "browser_mouse_click_xy", "browser_close", "browser_handle_dialog", "browser_something_new"] {
             XCTAssertFalse(p.allows(no), no)
         }
         XCTAssertTrue(p.allows("screenshot"))

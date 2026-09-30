@@ -75,7 +75,7 @@ final class ConformanceVectorTests: XCTestCase {
             n += 1
             let config = ReverseAttachClient.Config(
                 runtime: URL(string: c["runtime"]!)!, session: c["session"]!, secret: "x",
-                profile: .sandbox, deadline: Date())
+                profile: .desktop, deadline: Date())
             XCTAssertEqual(config.attachURL.absoluteString, c["expect"])
         }
         XCTAssertGreaterThanOrEqual(n, 23)

@@ -151,13 +151,13 @@ impl Upstream {
     }
 }
 
-/// Same list as Swift `ToolProfile.sandboxBrowserTools`: navigate / read / interact.
-/// Everything else from the upstream (run_code_unsafe, upload, pdf, network, raw
-/// mouse-by-coordinate, dialogs, close, and any new tool) is denied under sandbox.
-pub(crate) const SANDBOX_BROWSER_TOOLS: &[&str] = &[
+/// Same list as Swift `ToolProfile.desktopBrowserTools`: navigate / read / interact.
+/// Everything else from the upstream (evaluate / run_code_unsafe = arbitrary JS, upload,
+/// pdf, network, raw mouse-by-coordinate, dialogs, close, and any new tool) is denied
+/// under `desktop`.
+pub(crate) const DESKTOP_BROWSER_TOOLS: &[&str] = &[
     "browser_click",
     "browser_console_messages",
-    "browser_evaluate",
     "browser_fill_form",
     "browser_find",
     "browser_hover",
@@ -174,7 +174,17 @@ pub(crate) const SANDBOX_BROWSER_TOOLS: &[&str] = &[
 ];
 
 pub(crate) fn upstream_tool_allowed(name: &str, profile: &str) -> bool {
-    profile != "sandbox" || SANDBOX_BROWSER_TOOLS.contains(&name)
+    normalize_profile(profile) != Some("desktop") || DESKTOP_BROWSER_TOOLS.contains(&name)
+}
+
+/// `owner` | `desktop`; `sandbox` is the pre-rename name of `desktop` (instance-mcp#45)
+/// and is still accepted from clients and stored grants. Anything else is `None`.
+pub(crate) fn normalize_profile(profile: &str) -> Option<&'static str> {
+    match profile {
+        "owner" => Some("owner"),
+        "desktop" | "sandbox" => Some("desktop"),
+        _ => None,
+    }
 }
 
 pub(crate) static UPSTREAMS: Mutex<Vec<Arc<Upstream>>> = Mutex::new(Vec::new());
@@ -332,8 +342,9 @@ pub(crate) fn tool_list(profile: &str) -> Value {
         }
     });
 
-    // Both profiles get everything: a lent node is only useful if the agent can act on it,
-    // and the macOS sandbox profile already leaks a shell through `osascript`.
+    // Both profiles get every local tool, `bash` included. `desktop` is not a boundary on
+    // any platform (instance-mcp#45): mouse and keyboard reach a terminal, so hiding `bash`
+    // would remove a convenience, not a privilege. Only the browser subset differs.
     let _ = profile;
     let mut tools = vec![sys_info, screenshot, bash, mouse, key];
     for (_, t) in upstream_tools_for(profile, LOCAL_TOOL_NAMES) {
@@ -371,3 +382,27 @@ pub(crate) fn handle_tool_call(params: &Value, profile: &str) -> Result<Value, (
 }
 
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_is_the_old_name_of_desktop_and_unknown_profiles_do_not_widen() {
+        assert_eq!(normalize_profile("owner"), Some("owner"));
+        assert_eq!(normalize_profile("desktop"), Some("desktop"));
+        assert_eq!(normalize_profile("sandbox"), Some("desktop"));
+        assert_eq!(normalize_profile("Sandbox"), None);
+        assert_eq!(normalize_profile("observe"), None);
+    }
+
+    #[test]
+    fn desktop_never_gets_arbitrary_javascript() {
+        for tool in ["browser_evaluate", "browser_run_code_unsafe"] {
+            assert!(!upstream_tool_allowed(tool, "desktop"), "{tool}");
+            assert!(!upstream_tool_allowed(tool, "sandbox"), "{tool}");
+            assert!(upstream_tool_allowed(tool, "owner"), "{tool}");
+        }
+        assert!(upstream_tool_allowed("browser_navigate", "desktop"));
+    }
+}

@@ -86,7 +86,7 @@ final class GrantPersistenceTests: XCTestCase {
 
     private func request(_ session: String, secret: String = "abc", ttl: TimeInterval = 60) -> AttachManager.Request {
         // Unreachable runtime: the grant exists and its client keeps redialling.
-        AttachManager.Request(runtime: URL(string: "ws://127.0.0.1:9")!, session: session, profile: .sandbox,
+        AttachManager.Request(runtime: URL(string: "ws://127.0.0.1:9")!, session: session, profile: .desktop,
                               ttl: ttl, secret: secret, adminCredential: nil)
     }
 
@@ -104,7 +104,7 @@ final class GrantPersistenceTests: XCTestCase {
         let grants = await second.list()
         XCTAssertEqual(grants.map(\.id), [created.id])
         XCTAssertEqual(grants.first?.session, "laptop")
-        XCTAssertEqual(grants.first?.profile, .sandbox)
+        XCTAssertEqual(grants.first?.profile, .desktop)
         XCTAssertEqual(grants.first?.principal, "a@b")
         XCTAssertEqual(grants.first?.expiresAt.timeIntervalSince1970 ?? 0,
                        created.expiresAt.timeIntervalSince1970, accuracy: 1)

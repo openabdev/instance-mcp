@@ -40,7 +40,7 @@ check "reject both secret+admin" "[[ '$r' == *'exactly one'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a"}')
 check "reject neither secret nor admin" "[[ '$r' == *'exactly one'* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","profile":"Sandbox"}')
-check "reject unknown profile (no silent widening)" "[[ '$r' == *'profile must be owner or sandbox'* ]]"
+check "reject unknown profile (no silent widening)" "[[ '$r' == *'profile must be owner or desktop'* ]]"
 r=$($C -o /dev/null -w '%{http_code}' -X POST 127.0.0.1:8790/attach -H 'Content-Length: 99999999' -d '{}')
 check "oversized Content-Length refused before auth" "[[ '$r' == 000 || '$r' == 4* ]]"
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"a","secret":"s","ttl_secs":0}')
@@ -109,6 +109,7 @@ echo "== pre-minted secret path + sandbox profile (session pre) =="
 : > $LOG
 r=$($C -X POST 127.0.0.1:8790/attach -d '{"runtime":"ws://127.0.0.1:18090","session":"pre","profile":"sandbox","ttl_secs":30,"secret":"preminted-xyz"}')
 echo "$r"
+check "old profile name sandbox is accepted as desktop" "[[ '$r' == *'\"profile\":\"desktop\"'* ]]"
 for i in $(seq 1 20); do grep -q '"ev": "closed"' $LOG 2>/dev/null && break; sleep 0.5; done
 check "no mint call for secret path" "! grep -q '\"ev\": \"mint\"' $LOG"
 check "sandbox tools/list = sys_info,screenshot,bash" "[[ \$(py tools) == sys_info,screenshot,bash,mouse,key ]]"

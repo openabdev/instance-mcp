@@ -196,7 +196,7 @@ pub(crate) fn parse(text: &str, now: u64) -> Result<Vec<Persisted>, String> {
                 id: s(g, "id")?,
                 runtime: s(g, "runtime")?,
                 session: s(g, "session")?,
-                profile: s(g, "profile")?,
+                profile: crate::mcp::normalize_profile(&s(g, "profile")?)?.to_string(),
                 principal: s(g, "principal")?,
                 expires_at_epoch_secs: g["expires_at_epoch_secs"].as_u64()?,
                 secret: s(g, "secret")?,
@@ -215,7 +215,7 @@ mod tests {
             id: id.into(),
             runtime: "ws://127.0.0.1:1".into(),
             session: "s".into(),
-            profile: "sandbox".into(),
+            profile: "desktop".into(),
             principal: "you@example.com".into(),
             expires_at_epoch_secs: expires,
             secret: "sec".into(),
@@ -299,5 +299,26 @@ mod tests {
     fn a_missing_file_is_simply_empty() {
         let store = GrantStore::new(scratch("missing"));
         assert!(store.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grants_stored_under_the_old_profile_name_resume_as_desktop() {
+        let now = 1_000;
+        let text = format!(
+            r#"{{"version":1,"grants":[
+            {{"id":"old","runtime":"ws://x","session":"s","profile":"sandbox","principal":"p","expires_at_epoch_secs": {},"secret":"k"}},
+            {{"id":"bogus","runtime":"ws://x","session":"s","profile":"admin","principal":"p","expires_at_epoch_secs": {},"secret":"k"}}
+            ]}}"#,
+            now + 5,
+            now + 5
+        );
+        let grants = parse(&text, now).unwrap();
+        let ids: Vec<&str> = grants.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["old"],
+            "an unknown profile is dropped, never widened"
+        );
+        assert_eq!(grants[0].profile, "desktop");
     }
 }
