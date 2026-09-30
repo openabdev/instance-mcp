@@ -1,145 +1,153 @@
 # Tool profiles
 
-把一台電腦借給 `openab-pty` session 時（reverse attach，`POST /attach {profile}`），
-**profile 決定那個 session 裡的 agent 能看到、能呼叫哪些工具**。用 IAM 來類比：profile
-就像 managed policy，grant 就是把 policy attach 到一個 principal（session）上，lease
-（1–24 小時）則相當於 STS session duration。
+When a computer is lent to an `openab-pty` session (reverse attach, `POST /attach {profile}`),
+the **profile decides which tools the agent in that session can see and call**. In IAM terms:
+a profile is a managed policy, a grant attaches it to a principal (the session), and the lease
+(1–24 hours) is the session duration.
 
-- 過濾在**被借出的電腦端**執行（macOS：`ToolProfile.swift`；Linux：`poc/reverse-attach-linux/src/mcp.rs`），
-  pod 裡的 session 改不了。
-- 不在 profile 裡的工具，`tools/list` 不會列出；硬呼叫 `tools/call` 會得到 *unknown tool*，
-  和這個工具根本不存在時的回應一樣。
-- 未知的 profile 名稱一律拒絕（HTTP 400；存在磁碟上的 grant 則在重新載入時丟棄），
-  不會被當成 `owner` 放寬。
+- The filter runs **on the lent computer** (macOS: `ToolProfile.swift`; Linux:
+  `poc/reverse-attach-linux/src/mcp.rs`). The session in the pod cannot change it.
+- A tool outside the profile is absent from `tools/list`. A forced `tools/call` gets *unknown
+  tool*, the same answer as for a tool that does not exist.
+- Unknown profile names are refused: HTTP 400 on `POST /attach`, and a stored grant with an
+  unknown profile is dropped when it is loaded. They are never widened to `owner`.
 
-> ⚠️ **只有 `observe` 是安全邊界。** GUI 控制等同 shell：`osascript` 能跑
-> `do shell script`，`key` 能在終端機裡打字，`mouse` 能開終端機。所以 `desktop` 雖然拿掉了
-> `exec*`，權限上並沒有變小，只是少了一個方便的入口（見
-> [#45](https://github.com/openabdev/instance-mcp/issues/45)）。要給完整控制權時，請借一台
-> **專用的電腦**，例如 Linux hands node 或拋棄式的機器／VM，不要借你正在用的那台。
-> `ProfileBoundaryTests` 會擋下任何宣稱比 shell 窄、卻允許能拿到 shell 的工具的 profile。
+> ⚠️ **Only `observe` is a security boundary.** GUI control is a shell: `osascript` runs
+> `do shell script`, `key` can type into a terminal, and `mouse` can open one. `desktop` removes
+> `exec*`, but that takes away a convenient entry point, not a privilege
+> ([#45](https://github.com/openabdev/instance-mcp/issues/45)). When you grant full control, lend
+> a **dedicated computer** (a Linux hands node, a throwaway machine or VM), not the one you work
+> on. `ProfileBoundaryTests` fails any profile that claims to be narrower than a shell while
+> allowing a shell-capable tool.
 
-## 1. 目前可用的 profiles
+## 1. Available profiles
 
-| Profile | 等同 shell? | macOS 工具數 | Linux 工具數 | 用途 |
+| Profile | Shell-equivalent? | Tools on macOS | Tools on Linux | Purpose |
 |---|---|---|---|---|
-| `owner` | 是（直接） | 42 | 37 | 電腦主人自己的 CLI；全部工具 |
-| `desktop` | **是**（透過 GUI） | 20 | 20 | 讓 agent 操作桌面：看、點、打字、AppleScript、瀏覽器互動 |
-| `observe` | **否** | 2 | 2 | 只能看不能動：系統資訊與截圖 |
+| `owner` | yes (directly) | 42 | 37 | The owner's own CLI: every tool |
+| `desktop` | **yes** (through the GUI) | 20 | 20 | Let an agent drive the desktop: look, click, type, AppleScript, browser interaction |
+| `observe` | **no** | 2 | 2 | Look, never act: system info and screenshots |
 
-舊名 `sandbox` **已移除且不再接受**：它暗示一個並不存在的安全邊界。送 `sandbox` 會得到
-HTTP 400，存在磁碟上、以 `sandbox` 記錄的 grant 在重新載入時會被丟棄。
+The former name `sandbox` has been **removed and is refused**, because it implied a boundary
+that does not exist. Sending `sandbox` returns HTTP 400. A grant stored under `sandbox` is
+dropped when it is loaded.
 
-工具數包含瀏覽器工具（`browser_*`），前提是那台電腦有設定 Playwright upstream
-（`--upstream browser=…`；macmini、rpi1、black 都有）。沒有 upstream 時，`owner` 在 macOS
-上是 10 個工具、在 Linux 上是 5 個；`desktop` 在兩邊都是 5 個；`observe` 不受影響。
+The counts include the browser tools (`browser_*`), which exist only when the computer is
+configured with the Playwright upstream (`--upstream browser=…`; macmini, rpi1 and black are).
+Without it, `owner` has 10 tools on macOS and 5 on Linux, `desktop` has 5 on both, and `observe`
+is unchanged.
 
-清單取自 2026-09-30 macmini（instance-mcp，macOS）與 black（Linux hands node）的實際
-`tools/list`，再依本 repo 的 profile 規則過濾。
+Lists taken on 2026-09-30 from the live `tools/list` of macmini (instance-mcp, macOS) and black
+(Linux hands node), then filtered by this repository's profile rules.
 
-## 2. 各 profile 的完整工具清單
+## 2. Complete tool lists per profile
 
 ### `owner`
 
-**macOS — 42 個**
+#### macOS — 42 tools
 
-| 類別 | 工具 |
+| Category | Tools |
 |---|---|
-| 系統 | `sys_info` |
+| System | `sys_info` |
 | Shell | `exec`, `exec_start`, `exec_poll`, `exec_list`, `exec_cancel` |
-| 畫面 / 輸入 | `screenshot`, `mouse`, `key`, `osascript` |
-| 瀏覽器（32） | `browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_find`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_wait_for`, `browser_tabs`, `browser_take_screenshot`, `browser_console_messages`, `browser_resize`, `browser_evaluate`, `browser_run_code_unsafe`, `browser_file_upload`, `browser_drop`, `browser_pdf_save`, `browser_network_requests`, `browser_network_request`, `browser_handle_dialog`, `browser_emulate_media`, `browser_close`, `browser_drag`, `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, `browser_mouse_down`, `browser_mouse_up`, `browser_mouse_wheel` |
+| Screen / input | `screenshot`, `mouse`, `key`, `osascript` |
+| Browser (32) | `browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_find`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_wait_for`, `browser_tabs`, `browser_take_screenshot`, `browser_console_messages`, `browser_resize`, `browser_evaluate`, `browser_run_code_unsafe`, `browser_file_upload`, `browser_drop`, `browser_pdf_save`, `browser_network_requests`, `browser_network_request`, `browser_handle_dialog`, `browser_emulate_media`, `browser_close`, `browser_drag`, `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, `browser_mouse_down`, `browser_mouse_up`, `browser_mouse_wheel` |
 
-**Linux — 37 個**
+#### Linux — 37 tools
 
-| 類別 | 工具 |
+| Category | Tools |
 |---|---|
-| 系統 | `sys_info` |
+| System | `sys_info` |
 | Shell | `bash` |
-| 畫面 / 輸入 | `screenshot`, `mouse`, `key` |
-| 瀏覽器（32） | 與 macOS 相同的 32 個 |
+| Screen / input | `screenshot`, `mouse`, `key` |
+| Browser (32) | the same 32 as on macOS |
 
-Linux 沒有 `osascript`；`bash` 對應 macOS 的 `exec*`。
+Linux has no `osascript`. `bash` is the counterpart of macOS `exec*`.
 
 ### `desktop`
 
-**macOS — 20 個**
+#### macOS — 20 tools
 
-| 類別 | 工具 |
+| Category | Tools |
 |---|---|
-| 系統 | `sys_info` |
-| 畫面 / 輸入 | `screenshot`, `mouse`, `key`, `osascript` |
-| 瀏覽器（15） | `browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_find`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_wait_for`, `browser_tabs`, `browser_take_screenshot`, `browser_console_messages`, `browser_resize` |
+| System | `sys_info` |
+| Screen / input | `screenshot`, `mouse`, `key`, `osascript` |
+| Browser (15) | `browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_find`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_select_option`, `browser_wait_for`, `browser_tabs`, `browser_take_screenshot`, `browser_console_messages`, `browser_resize` |
 
-**Linux — 20 個**
+#### Linux — 20 tools
 
-| 類別 | 工具 |
+| Category | Tools |
 |---|---|
-| 系統 | `sys_info` |
+| System | `sys_info` |
 | Shell | `bash` |
-| 畫面 / 輸入 | `screenshot`, `mouse`, `key` |
-| 瀏覽器（15） | 與 macOS `desktop` 相同的 15 個 |
+| Screen / input | `screenshot`, `mouse`, `key` |
+| Browser (15) | the same 15 as macOS `desktop` |
 
-瀏覽器工具的過濾只限制「工具」，不限制瀏覽器本身：瀏覽器用的是那台電腦**持久化的
-profile**，帶著已登入網站的 cookie，而且能連到那台電腦能連到的網路，包括 localhost 和
-tailnet。
+The browser filter narrows the *tools*, not the browser. The browser runs with the computer's
+**persistent profile**, including cookies for sites it is logged in to, and it reaches whatever
+network the computer reaches, localhost and the tailnet included.
 
-### `observe`（新）
+### `observe`
 
-**macOS 與 Linux — 2 個**
+#### macOS and Linux — 2 tools
 
-| 類別 | 工具 |
+| Category | Tools |
 |---|---|
-| 系統 | `sys_info` |
-| 畫面 | `screenshot` |
+| System | `sys_info` |
+| Screen | `screenshot` |
 
-這是 allowlist：之後新增的任何工具（包括 local 工具與 upstream 瀏覽器工具），在
-`observe` 下預設都不給，除非明確加進 `ToolProfile.observeTools`（Linux：`OBSERVE_TOOLS`）。
-截圖仍會洩漏螢幕上顯示的內容，但 agent 沒辦法改變任何東西。
+This is an allowlist. Any tool added later, local or upstream (browser), is denied under
+`observe` until it is added to `ToolProfile.observeTools` (Linux: `OBSERVE_TOOLS`). A screenshot
+still discloses whatever is on screen, but the agent cannot change anything.
 
-## 3. 和上一個 profile 比起來少了什麼
+## 3. What each profile loses against the previous one
 
 ### `owner` → `desktop`
 
 | | macOS | Linux |
 |---|---|---|
-| 少了 local 工具 | `exec`, `exec_start`, `exec_poll`, `exec_list`, `exec_cancel`（5） | 無（`bash` 保留，理由見下） |
-| 少了瀏覽器工具（17） | `browser_evaluate`, `browser_run_code_unsafe`（任意 JavaScript）；`browser_file_upload`, `browser_drop`, `browser_pdf_save`（檔案系統）；`browser_network_requests`, `browser_network_request`（網路監看）；`browser_handle_dialog`, `browser_emulate_media`, `browser_close`；`browser_drag`, `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, `browser_mouse_down`, `browser_mouse_up`, `browser_mouse_wheel`（以座標操作的原始滑鼠） | 同左 17 個 |
-| 總數 | 42 → 20 | 37 → 20 |
-| **權限上是否變小** | **否**：`osascript` / `key` / `mouse` 仍能取得桌面使用者的 shell | **否**：`bash` 本身就是 shell |
+| Local tools removed | `exec`, `exec_start`, `exec_poll`, `exec_list`, `exec_cancel` (5) | none (`bash` stays; see below) |
+| Browser tools removed (17) | `browser_evaluate`, `browser_run_code_unsafe` (arbitrary JavaScript); `browser_file_upload`, `browser_drop`, `browser_pdf_save` (filesystem); `browser_network_requests`, `browser_network_request` (network inspection); `browser_handle_dialog`, `browser_emulate_media`, `browser_close`; `browser_drag`, `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`, `browser_mouse_down`, `browser_mouse_up`, `browser_mouse_wheel` (raw coordinate mouse) | the same 17 |
+| Total | 42 → 20 | 37 → 20 |
+| **Less privilege?** | **No**: `osascript`, `key` and `mouse` still reach the desktop user's shell | **No**: `bash` is a shell |
 
-Linux 的 `desktop` 保留 `bash`，因為 `mouse` 和 `key` 本來就能打開終端機。拿掉它只會讓
-agent 比較不方便，不會降低權限，就不假裝它是限制。
+Linux `desktop` keeps `bash` because `mouse` and `key` can open a terminal anyway. Hiding it would
+only inconvenience the agent without removing any privilege, and the profile does not pretend
+otherwise.
 
 ### `desktop` → `observe`
 
 | | macOS | Linux |
 |---|---|---|
-| 少了 local 工具 | `mouse`, `key`, `osascript`（3） | `bash`, `mouse`, `key`（3） |
-| 少了瀏覽器工具 | 全部 15 個 | 全部 15 個 |
-| 總數 | 20 → 2 | 20 → 2 |
-| **權限上是否變小** | **是**：沒有任何能輸入、執行或改變狀態的工具 | **是** |
+| Local tools removed | `mouse`, `key`, `osascript` (3) | `bash`, `mouse`, `key` (3) |
+| Browser tools removed | all 15 | all 15 |
+| Total | 20 → 2 | 20 → 2 |
+| **Less privilege?** | **Yes**: no tool can type, run or change state | **Yes** |
 
-## 相容性與現況
+## Compatibility and status
 
-- **線上值只有** `owner`、`desktop`、`observe`。其他值一律 400，包括舊名 `sandbox`。
-- **不相容變更**：client 與電腦必須一起更新。送 `sandbox` 的舊版 Connect / Remote 碰到
-  新版電腦會被拒；改送 `desktop` / `observe` 的新版 client 碰到舊版電腦也會被拒。
-  Client 端的更新在 oablab/oab-pty-mac#76。
-- **既有 grant**：舊版以 `sandbox` 存下的 grant，升級後在重新載入時會被丟棄，grant
-  因此結束，需要重新授權。
-- **降版**：新版存下的 grant 會寫 `desktop` 或 `observe`。舊版 daemon 不認得，會丟棄，
-  grant 因此結束，不會被放寬。
+- **Accepted wire values:** `owner`, `desktop`, `observe`. Anything else is a 400, including the
+  former `sandbox`.
+- **Breaking change:** clients and computers must be updated together. An older Connect or Remote
+  that sends `sandbox` is refused by an updated computer. An updated client that sends `desktop`
+  or `observe` is refused by an older computer. The client side is oablab/oab-pty-mac#77, which
+  also makes `observe` the default choice.
+- **Existing grants:** a grant stored as `sandbox` by an older build is dropped when the updated
+  daemon loads it, so the grant ends and must be made again.
+- **Downgrade:** grants stored by this build carry `desktop` or `observe`. An older daemon does
+  not recognize them and drops them, so the grant ends instead of widening.
 
-## 計畫中（尚未提供）
+## Planned (not yet available)
 
-- **`browser`**：只有 Playwright 工具，每個 grant 使用**用完即丟**的瀏覽器 profile，不含
-  `browser_evaluate`。它的邊界來自瀏覽器本身，但仍能連到那台電腦的網路，文件要照實寫。
-- **有型別的 App 操作**：用「開啟某個 App」「點某個選單項目」「列出視窗」這類小工具，搭配
-  bundle ID 白名單，取代受限層級裡通用的 `osascript`。白名單要排除 Terminal、iTerm、
-  Script Editor、系統設定。
-- **Custom policy**：grant 時直接帶 allow／deny 清單。它一樣要經過 `ProfileBoundaryTests`
-  的提權檢查，只要含有能拿到 shell 的工具，就自動標示為「等同 shell」。
-- **VM**：借出拋棄式的 macOS VM，而不是宿主機本身。
+- **`browser`**: Playwright tools only, with a **per-grant throwaway** browser profile and no
+  `browser_evaluate`. The browser provides the boundary. It still reaches the computer's network,
+  and the documentation must say so.
+- **Typed app control** in place of generic `osascript` for restricted tiers: open an app, click a
+  menu item, list windows, all limited by a bundle-ID allowlist. The allowlist must exclude
+  Terminal, iTerm, Script Editor and System Settings.
+- **Custom policies**: an allow/deny list supplied with the grant. It gets the same escalation
+  check as `ProfileBoundaryTests`: any list that contains a shell-capable tool is marked
+  shell-equivalent.
+- **VMs**: lend a disposable macOS VM instead of the host.
 
-以上都在 [#45](https://github.com/openabdev/instance-mcp/issues/45) 追蹤。
+All tracked in [#45](https://github.com/openabdev/instance-mcp/issues/45).
