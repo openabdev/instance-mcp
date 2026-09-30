@@ -137,7 +137,7 @@ let server = MCPServer(
         no screenshots. Fall back to `screenshot` only for things outside the browser.
         """)
         """,
-    tools: [SysInfoTool(agentVersion: version), ExecTool(), ExecStartTool(), ExecPollTool(), ExecListTool(), ExecCancelTool(), ScreenshotTool(), MouseTool(), KeyTool(), OsascriptTool()],
+    tools: ToolCatalog.local(agentVersion: version),
     upstreams: opts.upstreams.map { UpstreamMCP(name: $0.0, url: $0.1, log: log) }
 )
 let attachManager: AttachManager? = opts.attach
