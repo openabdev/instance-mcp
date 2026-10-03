@@ -23,12 +23,35 @@ import Foundation
 ///
 /// A `401` on the handshake means the verifier is gone (expired, revoked, or the
 /// pod was replaced): stop and report it, there is nothing to wait for.
+///
+/// The same client also dials an openab-sb switchboard's `GET /vm/attach`
+/// (`Kind.switchboard`, openab-sb `docs/SOUTHBOUND-CONTRACT.md`). The socket
+/// carries the same plain MCP; only the URL, the lifetime and the close codes
+/// differ:
+///
+/// | code | meaning (southbound §5) | we |
+/// |---|---|---|
+/// | 4002 | replaced by another daemon with the same secret | stop |
+/// | 4003 | the operator revoked or rotated the secret | stop |
+/// | 4005 / 1001 / 1000 / error | handshake failed, restart, drop | redial with backoff |
+/// | `401`/`403` on upgrade | wrong secret | retry at most every 5 minutes |
+///
+/// A switchboard secret is long-lived, so there is no deadline; the secret file
+/// is re-read on every dial so a rotated secret heals at the next retry.
 public actor ReverseAttachClient {
+    public enum Kind: Equatable, Sendable {
+        /// openab-pty `GET /tools/attach/{session}`, CLIENT-CONTRACT §9.2.
+        case openabPty
+        /// openab-sb `GET /vm/attach`, SOUTHBOUND-CONTRACT.
+        case switchboard
+    }
+
     public enum Terminal: Equatable, Sendable {
         case grantExpired            // 4001
         case replaced                // 4002
         case sessionEnded            // 4004
         case revoked                 // 4010
+        case secretRevoked           // 4003 from a switchboard
         case handshakeRejected(Int)  // HTTP status on upgrade, typically 401
         case cancelled
         case deadline                // our own grant deadline passed while redialling
@@ -52,13 +75,33 @@ public actor ReverseAttachClient {
         public var deadline: Date
         public var initialBackoff: TimeInterval = 1
         public var maxBackoff: TimeInterval = 30
+        public var kind: Kind = .openabPty
+        /// When set, the secret is re-read from here on every dial (falling back
+        /// to `secret` if the file cannot be read).
+        public var secretFile: URL? = nil
+        /// How long to wait after a credential refusal before trying again.
+        public var credentialRetry: TimeInterval = 300
+        /// A connection that stayed up this long resets the backoff (switchboard).
+        public var stableAfter: TimeInterval = 60
 
         public init(runtime: URL, session: String, secret: String, profile: ToolProfile, deadline: Date) {
             self.runtime = runtime; self.session = session; self.secret = secret
             self.profile = profile; self.deadline = deadline
         }
 
+        /// A switchboard dial: `url` is the full `…/vm/attach` URL, used as-is.
+        public static func switchboard(url: URL, secret: String, secretFile: URL? = nil,
+                                       profile: ToolProfile) -> Config {
+            var c = Config(runtime: url, session: "switchboard", secret: secret, profile: profile,
+                           deadline: .distantFuture)
+            c.kind = .switchboard
+            c.secretFile = secretFile
+            c.maxBackoff = 60
+            return c
+        }
+
         public var attachURL: URL {
+            if kind == .switchboard { return runtime }
             var c = URLComponents(url: runtime, resolvingAgainstBaseURL: false)!
             let base = c.path.hasSuffix("/") ? String(c.path.dropLast()) : c.path
             c.path = base + "/tools/attach/" + session
@@ -71,9 +114,18 @@ public actor ReverseAttachClient {
     public enum Disposition: Equatable, Sendable {
         case stop(Terminal)
         case redial
+        /// The credential was refused; only an operator can fix it. Retry slowly.
+        case waitForCredentials
     }
 
-    public static func disposition(closeCode: Int) -> Disposition {
+    public static func disposition(closeCode: Int, kind: Kind = .openabPty) -> Disposition {
+        if kind == .switchboard {
+            switch closeCode {
+            case 4002: return .stop(.replaced)
+            case 4003: return .stop(.secretRevoked)
+            default:   return .redial            // 4005, 1001, 1000, 1006, anything else
+            }
+        }
         switch closeCode {
         case 4001: return .stop(.grantExpired)
         case 4002: return .stop(.replaced)
@@ -83,7 +135,13 @@ public actor ReverseAttachClient {
         }
     }
 
-    public static func disposition(handshakeStatus: Int) -> Disposition {
+    public static func disposition(handshakeStatus: Int, kind: Kind = .openabPty) -> Disposition {
+        if kind == .switchboard {
+            switch handshakeStatus {
+            case 401, 403: return .waitForCredentials
+            default:       return .redial      // switchboard down, restarting, or behind a proxy error
+            }
+        }
         switch handshakeStatus {
         case 200..<300, 101: return .redial // not a rejection; caller should not be here
         case 429, 500..<600: return .redial // throttled or the runtime is unwell; wait
@@ -136,29 +194,60 @@ public actor ReverseAttachClient {
         while !Task.isCancelled {
             if Date() >= config.deadline { set(.ended(.deadline)); return }
             set(.dialing)
+            let started = Date()
             let outcome = await dialOnce()
             if Task.isCancelled { return }
+            if config.kind == .switchboard, Date().timeIntervalSince(started) >= config.stableAfter {
+                backoff = config.initialBackoff
+            }
+            let base: TimeInterval
             switch outcome {
             case .stop(let t):
                 log("attach \(config.session): stopping (\(t))")
                 set(.ended(t)); return
+            case .waitForCredentials:
+                base = config.credentialRetry
             case .redial:
-                let remaining = config.deadline.timeIntervalSinceNow
-                guard remaining > 0 else { set(.ended(.deadline)); return }
-                let wait = min(backoff, remaining)
-                set(.waitingToRedial(seconds: wait))
-                log("attach \(config.session): redial in \(Int(wait))s")
-                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                base = backoff
                 backoff = min(backoff * 2, config.maxBackoff)
             }
+            let remaining = config.deadline.timeIntervalSinceNow
+            guard remaining > 0 else { set(.ended(.deadline)); return }
+            let wait = min(config.kind == .switchboard ? Self.jitter(base) : base, remaining)
+            set(.waitingToRedial(seconds: wait))
+            log("attach \(config.session): redial in \(Int(wait))s")
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
         }
+    }
+
+    /// ±20 %, so many daemons restarted together do not redial in lockstep.
+    static func jitter(_ base: TimeInterval) -> TimeInterval {
+        base * Double.random(in: 0.8...1.2)
+    }
+
+    /// The secret for the next dial: the file's current contents when one is
+    /// configured and readable, else the secret given at start.
+    func currentSecret() -> String {
+        if let file = config.secretFile,
+           let text = try? String(contentsOf: file, encoding: .utf8) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+            log("attach \(config.session): \(file.path) is empty; using the previous secret")
+        }
+        return config.secret
+    }
+
+    /// The upgrade request for the next dial, with the current secret.
+    func attachRequest() -> URLRequest {
+        var req = URLRequest(url: config.attachURL)
+        req.setValue("Bearer \(currentSecret())", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 15
+        return req
     }
 
     /// One connection lifetime. Returns what to do next.
     private func dialOnce() async -> Disposition {
-        var req = URLRequest(url: config.attachURL)
-        req.setValue("Bearer \(config.secret)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 15
+        let req = attachRequest()
         let session = URLSession(configuration: .ephemeral)
         defer { session.finishTasksAndInvalidate() }
         let ws = session.webSocketTask(with: req)
@@ -178,13 +267,13 @@ public actor ReverseAttachClient {
                 if Task.isCancelled { return .stop(.cancelled) }
                 if let http = ws.response as? HTTPURLResponse, http.statusCode != 101, firstFrame {
                     log("attach \(config.session): handshake rejected \(http.statusCode)")
-                    return Self.disposition(handshakeStatus: http.statusCode)
+                    return Self.disposition(handshakeStatus: http.statusCode, kind: config.kind)
                 }
                 let code = ws.closeCode.rawValue
                 if code != 0 {
                     log("attach \(config.session): closed \(code) after \(served) calls")
                     finishAttached()
-                    return Self.disposition(closeCode: code)
+                    return Self.disposition(closeCode: code, kind: config.kind)
                 }
                 log("attach \(config.session): socket error \(error.localizedDescription)")
                 finishAttached()

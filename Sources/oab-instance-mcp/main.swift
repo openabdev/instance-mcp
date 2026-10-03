@@ -21,6 +21,10 @@ struct Options {
     var persistGrants = true
     /// name=url pairs; each is a loopback MCP server whose tools are re-served.
     var upstreams: [(String, URL)] = []
+    /// openab-sb `…/vm/attach` to dial, its secret file, and the profile served there.
+    var switchboard: String? = nil
+    var switchboardSecretFile: String? = nil
+    var switchboardProfile: ToolProfile = .observe
 }
 
 func usage() -> Never {
@@ -49,6 +53,16 @@ func usage() -> Never {
                       Keep reverse-attach grants in memory only. By default live grants are
                       saved (record: ~/Library/Application Support/oab-instance-mcp/grants.json,
                       mode 600; secret: login Keychain) and re-dialled after a restart.
+      --switchboard <wss://host/vm/attach>
+                      Dial an openab-sb switchboard and serve this computer's tools on that socket, so
+                      the switchboard's callers can reach it (this Mac dials out; nothing listens).
+                      Redials on its own for as long as the process runs. ws:// is loopback-only.
+      --switchboard-secret-file <path>
+                      The VM secret from `openab-sb gen-secret` (required with --switchboard). Re-read
+                      on every dial, so rotating it is: update the file; the next retry picks it up.
+      --switchboard-profile observe|desktop|owner
+                      Tool profile served to the switchboard (default observe: sys_info + screenshot).
+                      The switchboard's own per-caller allowlist applies on top.
       --menu-bar      Show a status item in the menu bar (permissions, activity, restart/quit).
       --public-url    The URL clients use (shown/copied from the menu); defaults to the local one.
 
@@ -81,6 +95,14 @@ while !args.isEmpty {
     case "--no-grant-persistence": opts.persistGrants = false
     case "--public-url": opts.publicURL = next(a)
     case "--no-attach": opts.attach = false
+    case "--switchboard": opts.switchboard = next(a)
+    case "--switchboard-secret-file": opts.switchboardSecretFile = next(a)
+    case "--switchboard-profile":
+        let v = next(a)
+        guard let p = ToolProfile(rawValue: v) else {
+            fputs("--switchboard-profile wants observe, desktop or owner\n", stderr); usage()
+        }
+        opts.switchboardProfile = p
     case "--upstream":
         let v = next(a)
         guard let eq = v.firstIndex(of: "="), let u = URL(string: String(v[v.index(after: eq)...])),
@@ -99,6 +121,24 @@ if let f = opts.tokenFile {
     let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { fputs("--token-file is empty\n", stderr); exit(66) }
     opts.token = t
+}
+
+// Validated before anything starts, so a typo fails the launch instead of a dial.
+var switchboardTarget: (url: URL, file: URL, secret: String)? = nil
+if let raw = opts.switchboard {
+    let url: URL
+    do { url = try Switchboard.validate(raw) } catch { fputs("\(error)\n", stderr); exit(64) }
+    guard let f = opts.switchboardSecretFile else {
+        fputs("--switchboard needs --switchboard-secret-file\n", stderr); exit(64)
+    }
+    let file = URL(fileURLWithPath: (f as NSString).expandingTildeInPath)
+    guard let s = try? String(contentsOf: file, encoding: .utf8),
+          !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        fputs("cannot read --switchboard-secret-file \(f), or it is empty\n", stderr); exit(66)
+    }
+    switchboardTarget = (url, file, s.trimmingCharacters(in: .whitespacesAndNewlines))
+} else if opts.switchboardSecretFile != nil {
+    fputs("--switchboard-secret-file needs --switchboard\n", stderr); exit(64)
 }
 
 let auth = AuthPolicy(allowedLogins: opts.allowLogins, bearerToken: opts.token, allowLocalUnauthenticated: opts.insecureLocal)
@@ -168,6 +208,16 @@ if let attachManager {
         let n = await attachManager.resume()
         if n > 0 { log("resumed \(n) reverse-attach grant(s) from the previous run") }
     }
+}
+
+// Global for the same reason as `http`: the client must outlive this scope.
+let switchboardClient: ReverseAttachClient? = switchboardTarget.map { t in
+    Switchboard.client(url: t.url, secretFile: t.file, secret: t.secret, profile: opts.switchboardProfile,
+                       server: server, log: log)
+}
+if let switchboardClient, let t = switchboardTarget {
+    log("switchboard: dialling \(t.url.absoluteString) as \(opts.switchboardProfile.rawValue)")
+    Task { await switchboardClient.start() }
 }
 
 signal(SIGPIPE, SIG_IGN)
