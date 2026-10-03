@@ -224,6 +224,10 @@ oab-instance-mcp --token-file ~/.config/oab-instance-mcp/token \
   - On `401`/`403` it retries every ~5 minutes rather than stopping.
 - **Secret rotation:** the secret file is re-read on every dial, so rotating the secret means
   updating the file; the next retry picks it up.
+- **Installed with the package:** put the URL in `~/.config/oab-instance-mcp/switchboard.url`, the
+  secret in `switchboard.secret` (mode 600) and, optionally, the profile in `switchboard.profile`.
+  Then re-run the installer: the flags live in the LaunchAgent plist, which the installer writes
+  whenever both files exist, so a restart alone does not pick them up and upgrades keep them.
 - **Exiting:** the HTTP endpoint keeps serving after the switchboard attach stops. Restart the
   process (or the LaunchAgent) to dial again after a `4002` or `4003`.
 

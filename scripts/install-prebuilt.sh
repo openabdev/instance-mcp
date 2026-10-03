@@ -185,6 +185,17 @@ if [ "${SKIP_LAUNCH:-0}" != "1" ] && /bin/launchctl print "gui/$UID_/dev.openab.
 elif [ "${TEST_WITH_UPSTREAM:-0}" = "1" ]; then
   ARGS+=(--upstream browser=http://127.0.0.1:8794/mcp)
 fi
+# Switchboard mode is configured by files, so an update keeps it: the URL in
+# switchboard.url plus the secret in switchboard.secret turn it on, and
+# switchboard.profile (observe|desktop|owner) optionally picks the profile.
+SB_DIR="$HOME_DIR/.config/oab-instance-mcp"
+if [ -s "$SB_DIR/switchboard.url" ] && [ -s "$SB_DIR/switchboard.secret" ]; then
+  SB_URL=$(/usr/bin/head -n 1 "$SB_DIR/switchboard.url" | /usr/bin/tr -d '[:space:]')
+  ARGS+=(--switchboard "$SB_URL" --switchboard-secret-file "$SB_DIR/switchboard.secret")
+  if [ -s "$SB_DIR/switchboard.profile" ]; then
+    ARGS+=(--switchboard-profile "$(/usr/bin/head -n 1 "$SB_DIR/switchboard.profile" | /usr/bin/tr -d '[:space:]')")
+  fi
+fi
 for i in "${!ARGS[@]}"; do "$PB" -c "Add :ProgramArguments:$i string ${ARGS[$i]}" "$PLIST"; done
 "$PB" -c 'Add :RunAtLoad bool true' "$PLIST"
 "$PB" -c 'Add :KeepAlive bool true' "$PLIST"
