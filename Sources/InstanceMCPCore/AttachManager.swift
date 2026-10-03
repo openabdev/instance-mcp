@@ -318,6 +318,7 @@ extension AttachManager.Grant {
         case .replaced: return "replaced"
         case .sessionEnded: return "session_ended"
         case .revoked: return "revoked"
+        case .secretRevoked: return "secret_revoked"
         case .handshakeRejected(let s): return "handshake_rejected_\(s)"
         case .cancelled: return "cancelled"
         case .deadline: return "deadline"

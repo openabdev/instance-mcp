@@ -57,7 +57,7 @@ this exists for what SSH cannot reach.
 
 - [Quick start](#quick-start) · [Platforms](#platforms)
 - [Tools](#tools) · [Auth](#auth)
-- [Reverse attach](#lending-this-mac-to-a-sandboxed-agent-reverse-attach) · [Browser tools](#browser-tools-for-lent-sessions---upstream)
+- [Reverse attach](#lending-this-mac-to-a-sandboxed-agent-reverse-attach) · [Switchboard](#serving-a-switchboard---switchboard) · [Browser tools](#browser-tools-for-lent-sessions---upstream)
 - Deploy & operate: [Download and install](#download-and-install) · [Build & test](#build--test-on-macmini-the-laptop-never-compiles-swift) · [Deploy](#deploy-run-on-the-target) · [Menu bar](#menu-bar) · [Operate](#operate)
 - Operator notes: [TCC & signing](#tcc-grants-survive-re-deploys-only-if-the-signature-does) · [Gotchas](#gotchas-each-one-cost-a-cycle)
 
@@ -199,6 +199,33 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
   errors until the grant deadline. Nothing on the attached socket is trusted as identity — the
   grant is the identity; `Tailscale-User-Login` there would be pod-supplied.
 - `--no-attach` disables the plane (`/attach` → 404).
+
+### Serving a switchboard (`--switchboard`)
+
+An [openab-sb](https://github.com/openabdev/openab-sb) switchboard lets callers (Connect,
+agents) reach a computer that can only dial out. This daemon can be that computer: it dials the
+switchboard's `GET /vm/attach` and serves its tools there, under one profile, for as long as it
+runs.
+
+```sh
+openab-sb gen-secret                    # on the switchboard: verifier → [vm].secret_sha256
+oab-instance-mcp --token-file ~/.config/oab-instance-mcp/token \
+  --switchboard wss://<switchboard>.<tailnet>.ts.net/vm/attach \
+  --switchboard-secret-file ~/.config/oab-instance-mcp/switchboard.secret \
+  --switchboard-profile observe         # observe (default) | desktop | owner
+```
+
+- **Profile:** the profile here is this computer's ceiling. The switchboard's per-caller
+  allowlist applies on top, so a caller gets the intersection.
+- **Transport:** `ws://` is accepted for loopback only. Anything else needs `wss://`.
+- **Redial policy** (openab-sb `SOUTHBOUND-CONTRACT.md`):
+  - It stops on `4002` (replaced by another daemon) and `4003` (secret revoked).
+  - It redials with backoff (1 s → 60 s, ±20 %) on `4005`, `1001`, drops and proxy errors.
+  - On `401`/`403` it retries every ~5 minutes rather than stopping.
+- **Secret rotation:** the secret file is re-read on every dial, so rotating the secret means
+  updating the file; the next retry picks it up.
+- **Exiting:** the HTTP endpoint keeps serving after the switchboard attach stops. Restart the
+  process (or the LaunchAgent) to dial again after a `4002` or `4003`.
 
 ### Browser tools for lent sessions (`--upstream`)
 
