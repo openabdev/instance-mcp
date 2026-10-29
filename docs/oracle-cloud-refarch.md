@@ -159,7 +159,8 @@ from the reference VM, for comparison:
 ```sh
 V=0.8.0
 cd /tmp
-gh release download v$V --repo openabdev/instance-mcp --pattern "*linux-arm64*"
+curl -fsSLO https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-arm64.tar.gz
+curl -fsSLO https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-arm64.tar.gz.sha256
 sha256sum -c oab-instance-mcp-$V-linux-arm64.tar.gz.sha256
 tar -xzf oab-instance-mcp-$V-linux-arm64.tar.gz
 
@@ -169,12 +170,16 @@ sudo -u oabmcp install -D -m 755 oab-instance-mcp-$V-linux-arm64/pw-mcp.sh \
   /home/oabmcp/.local/oab-instance-mcp/pw-mcp.sh
 ```
 
-`gh release download` needs a logged-in `gh`. The release page also lists the asset URLs for `curl`.
+The reference VM has no `gh`, so the commands above fetch the two release assets with `curl`.
 
 ### 3.5 Headless seat (service user)
 
 The seat is a headless sway with one virtual 1920×1080 output and no input devices. `grim`, `wtype`
 and the daemon's virtual pointer use its Wayland socket.
+
+Write the files in 3.5 and 3.8 as `oabmcp`, so they keep that owner. For example:
+`sudo -u oabmcp mkdir -p /home/oabmcp/.config/sway`, then
+`sudo -u oabmcp tee /home/oabmcp/.config/sway/config >/dev/null`, with the config as its input.
 
 `~oabmcp/.config/sway/config`:
 
@@ -293,8 +298,9 @@ sudo -u oabmcp bash -c '
 
 ### 3.8 User units (service user)
 
-Two units, under `~oabmcp/.config/systemd/user/`. Replace `<token-file>` and `<tailnet-login>` with
-real values before you save. `<token-file>` becomes `/home/oabmcp/.config/oab-instance-mcp/token`.
+Two units, under `~oabmcp/.config/systemd/user/`, written as `oabmcp` as in 3.5. Replace
+`<token-file>` and `<tailnet-login>` with real values before you save. `<token-file>` becomes
+`/home/oabmcp/.config/oab-instance-mcp/token`.
 
 `oab-pw-mcp.service`:
 
@@ -345,7 +351,14 @@ Notes:
 
 - `BIND` stays on `127.0.0.1`. Never bind to a tailnet or LAN address. The login check trusts a
   header that only `tailscale serve` sets, and it trusts it only from loopback.
-- `MCP_ALLOW_LOGIN` is the login allowed to call the daemon. Read it from `tailscale status`.
+- `MCP_ALLOW_LOGIN` is the login allowed to call the daemon. Read the full login with
+  `tailscale status --json`. Plain `tailscale status` truncates it. The login is the `LoginName` of the
+  user whose `ID` equals `Self.UserID`:
+
+  ```sh
+  tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s["User"][str(s["Self"]["UserID"])]["LoginName"])'
+  ```
+
 - `MCP_UPSTREAM` routes `browser_*` calls to the Playwright unit. If that unit is down, the browser
   tools disappear and the local tools keep working.
 
@@ -417,7 +430,7 @@ ACCEPT='Accept: application/json, text/event-stream'
 PROTO='MCP-Protocol-Version: 2025-06-18'
 
 # 1. initialize. The response carries an Mcp-Session-Id header.
-curl -s -D /tmp/mcp-headers.txt -o /dev/null -X POST $U/mcp \
+curl -s -D /tmp/mcp-headers.txt -o /dev/null -w '%{http_code}\n' -X POST $U/mcp \
   -H "$AUTH" -H "$JSON" -H "$ACCEPT" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"refarch-check","version":"0"}}}'
 SID=$(grep -i '^mcp-session-id' /tmp/mcp-headers.txt | tr -d '\r' | awk '{print $2}')
@@ -452,22 +465,36 @@ tools. Use a test session, not one doing real work.
 
 ### 5.1 What each profile exposes
 
-Source: `poc/reverse-attach-linux/src/mcp.rs` (`DESKTOP_BROWSER_TOOLS`, `OBSERVE_TOOLS`,
-`upstream_tool_allowed`). The owner counts were checked live.
+Source: `poc/reverse-attach-linux/src/mcp.rs` (`OBSERVE_TOOLS`, `upstream_tool_allowed`). The owner counts were checked live.
 
 | Profile | Local tools | Browser tools | Shell-equivalent? |
 |---|---|---|---|
 | `owner` | `sys_info`, `screenshot`, `bash`, `mouse`, `key` | all 32, including `browser_evaluate` and `browser_run_code_unsafe` | **Yes** |
-| `desktop` | the same 5 local tools, `bash` included | 15: navigate, read, click, type, fill, select, press, tabs, resize, snapshot, screenshot, console, find, hover, wait | **Yes**, through `bash` |
 | `observe` | `sys_info`, `screenshot` | none | No |
 
-`owner` and `desktop` both offer `bash`, which runs as `oabmcp`. Only `observe` is a real boundary.
-`desktop` does not offer `browser_evaluate` or `browser_run_code_unsafe`, but it still offers
-`bash`, so it does not stop a shell.
+`owner` is the only profile with `bash`, `mouse`, `key` and the browser tools. `bash` runs as
+`oabmcp`, and `mouse` and `key` can open a terminal or type into one. `observe` is the only real
+boundary. Treat `owner` as shell-equivalent.
 
-### 5.2 What `oabmcp` can read
+### 5.2 The browser is not isolated
 
-The service user has no `sudo`, but a `bash` call under `owner` or `desktop` runs as that user and can
+The browser (`@playwright/mcp`, run as `oabmcp`) belongs to `owner`. It is not isolated from the
+node. Through the browser, an `owner` session can reach:
+
+- loopback services on the VM, including the daemon on `127.0.0.1:8795`,
+- tailnet hosts that the VM can reach,
+- `file://` paths that `oabmcp` can read, including the bearer token file and the grants file.
+
+We accept this and treat the browser as owner-level access, which is shell-equivalent. It is not a
+sandbox. The open issue is
+[openabdev/instance-mcp#45](https://github.com/openabdev/instance-mcp/issues/45): the sandbox profile
+is not a boundary, because GUI control is a shell. Until that issue is fixed, a session that reads
+untrusted pages, issues or email must not get `owner`, because a page can steer the browser into
+any of the paths above.
+
+### 5.3 What `oabmcp` can read
+
+The service user has no `sudo`, but a `bash` call under `owner` runs as that user and can
 read everything it owns:
 
 - the bearer token (`<token-file>`),
@@ -475,17 +502,19 @@ read everything it owns:
 - the Playwright profile (`~oabmcp/.local/oab-instance-mcp/pw-profile`, which holds cookies and
   logins for every site the browser opened).
 
-Lend `owner` or `desktop` only to sessions you trust. Never lend them to a session that reads
-untrusted pages, issues or email.
+Lend `owner` only to sessions you trust. Never lend it to a session that reads untrusted pages,
+issues or email.
 
-### 5.3 Recommendations
+### 5.4 Recommendations
 
 1. **Default to `observe`** for any session that reads untrusted content.
 2. **Keep the service user unprivileged.** No `sudo`, `lxd` or `docker`.
-3. **Tag the node.** The reference node is owned by a personal login and has no tag. In the admin
-   console, tag it (for example `tag:oab-hands`, a suggested name) and write an ACL that lets only
-   your Connect Macs and the openab-pty runtime nodes reach port 8444. The investigation did not
-   review the tailnet ACL, so review it before you rely on this.
+3. **Prerequisite, not done: restrict the tailnet ACL.** The reference node is owned by a personal
+   login and has no tag. Before you rely on `owner` over the tailnet, tag the node (for example
+   `tag:oab-hands`, a suggested name) and write an ACL that lets only the openab-pty sidecars and
+   the Connect Mac that registers the node reach port 8444. The ACL limits who can call the node.
+   It does not limit what the browser reaches from the VM (5.2). The investigation did not review
+   the tailnet ACL, so review it before you rely on this.
 4. **Keep the bearer token and `MCP_ALLOW_LOGIN` set.** Never run the daemon with
    `MCP_INSECURE_LOCAL`.
 5. **Do not run the daemon as `ubuntu`.** That account has passwordless `sudo` and `lxd` membership,
@@ -512,7 +541,7 @@ computer**.
 | Field | Choice |
 |---|---|
 | Computer | `oracle-vm` |
-| Profile | `observe` for any session that reads untrusted content. Use `desktop` or `owner` only for trusted tasks (section 5). |
+| Profile | `observe` for any session that reads untrusted content. Use `owner` only for trusted tasks (section 5). |
 | Lease | 1 to 24 hours |
 
 Connect calls `POST /attach` on the node. The grant shows `idle` until the runtime dials back, then
@@ -554,34 +583,49 @@ example after a pod replacement, ends with `handshake_rejected_401`. Lend the co
 ### 7.4 Logs
 
 ```sh
-ouser journalctl --user -u oab-instance-mcp -n 100 --no-pager   # denies, attach events
-ouser journalctl --user -u oab-pw-mcp -n 100 --no-pager         # browser upstream
-ouser journalctl --user -u oab-seat -n 50 --no-pager            # sway
+sudo journalctl _SYSTEMD_USER_UNIT=oab-instance-mcp.service -n 100 --no-pager   # denies, attach events
+sudo journalctl _SYSTEMD_USER_UNIT=oab-pw-mcp.service -n 100 --no-pager         # browser upstream
+sudo journalctl _SYSTEMD_USER_UNIT=oab-seat.service -n 50 --no-pager            # sway
 ```
 
-A `deny … no Tailscale-User-Login header` line means a request reached loopback without going
-through serve.
+The `oabmcp` user cannot read these logs with `journalctl --user`. The admin account reads them from
+the system journal, filtered by unit.
+
+A line `deny POST /mcp : no Tailscale identity on request` means a request reached loopback without
+going through serve. The daemon answers 401 for every denied request, whatever the reason.
 
 ### 7.5 Upgrade
 
 1. Read the release notes. Check whether a unit file or the Playwright pin changes.
-2. Download and verify the new tarball (3.4).
-3. Keep the current binary for rollback, as the service user:
+2. Download and verify the new tarball as in 3.4, with `V` set to the new version. The extracted
+   binary is `/tmp/oab-instance-mcp-$V-linux-arm64/oab-instance-mcp`.
+3. Keep the current binary for rollback. Use absolute paths, because `~` is expanded by the admin
+   shell before `sudo` runs:
 
    ```sh
-   sudo -u oabmcp cp ~/.local/oab-instance-mcp/oab-instance-mcp \
-     ~/.local/oab-instance-mcp/oab-instance-mcp.prev
+   sudo -u oabmcp cp /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp \
+     /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp.prev
    ```
 
-4. Install the new binary and restart:
+4. Stop the daemon, install the new binary, and start it again. Stopping first avoids replacing a
+   running executable:
 
    ```sh
-   sudo -u oabmcp install -m 755 <new-binary> ~/.local/oab-instance-mcp/oab-instance-mcp
-   ouser systemctl --user restart oab-instance-mcp
+   ouser systemctl --user stop oab-instance-mcp
+   sudo -u oabmcp install -m 755 /tmp/oab-instance-mcp-$V-linux-arm64/oab-instance-mcp \
+     /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp
+   ouser systemctl --user start oab-instance-mcp
    ```
 
 5. Run the handshake (4.3) and confirm the tool count.
-6. To roll back, copy `oab-instance-mcp.prev` over the binary and restart.
+6. To roll back, stop the daemon, copy `oab-instance-mcp.prev` back over the binary, and start it:
+
+   ```sh
+   ouser systemctl --user stop oab-instance-mcp
+   sudo -u oabmcp install -m 755 /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp.prev \
+     /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp
+   ouser systemctl --user start oab-instance-mcp
+   ```
 
 Before you rely on a rollback copy, compare its SHA-256 with the release it should match (3.4).
 
@@ -596,8 +640,8 @@ sudo tailscale serve --https=8444 off
 - **The installer exits 78 without `wlrctl`.** `scripts/install-linux.sh` checks for `tailscale`,
   `grim`, `wlrctl`, `wtype` and `python3`, and stops at the first missing one. The reference VM
   has no `wlrctl`, so the installer was not run there. The hand-written units in section 3 do the
-  same job. Installing `wlrctl` is the way to make the installer run. Its availability on Ubuntu
-  24.04 was not checked.
+  same job. `wlrctl` is not in the Ubuntu 24.04 archive (`apt-cache show wlrctl` finds nothing),
+  so the installer cannot run on that release as written.
 - **The installer exits 78 without a Wayland socket.** It needs a running desktop or
   `--headless-seat`. The `--headless-seat` path was not run on this VM. Section 3.5 is what runs
   here.
@@ -624,7 +668,7 @@ sudo tailscale serve --https=8444 off
 |---|---|---|
 | `401` on `127.0.0.1:8795` with a valid token | No `Tailscale-User-Login` header on loopback | Expected. Test through the serve URL (4.3). |
 | Serve URL returns `000` from the node itself | The node cannot route to its own MagicDNS name | Probe from another tailnet machine |
-| Installer exits 78, "missing: wlrctl" | Installer's hard requirement | Install `wlrctl`, or use the hand-written units in section 3 |
+| Installer exits 78, "missing: wlrctl" | Installer's hard requirement. `wlrctl` is not in the Ubuntu 24.04 archive. | Use the hand-written units in section 3 |
 | Installer exits 78, "no Wayland socket" | No seat running | Use `--headless-seat`, or start a desktop. Check `oab-seat` is active. |
 | Connect cannot reach the computer | Serve mapping missing, or daemon down | `sudo tailscale serve status`; `ouser systemctl --user status oab-instance-mcp` |
 | Connect reports an auth failure | Token in Connect differs from `<token-file>` | Re-paste the token (7.2) |
@@ -658,16 +702,11 @@ sudo tailscale serve --https=8444 off
 | Pre-upgrade backup | Not checked | `/home/oabmcp/pre-0.8-install-backup-…/oab-instance-mcp` has the **same SHA-256 as 0.8.0**. It is not a pre-0.8 binary, so it cannot serve as a rollback. |
 | `MCP_ALLOW_LOGIN` | Recommended | Set to the owner's personal login (not reproduced here) |
 
-### 9.2 Differences from the brief that this page corrects
-
-- **`desktop` does not expose `browser_evaluate` or `browser_run_code_unsafe`.** Only `owner` does.
-  `desktop` still exposes `bash`, so it is still shell-equivalent.
-
-### 9.3 Checks behind this page
+### 9.2 Checks behind this page
 
 - The v0.8.0 arm64 tarball matches its published `.sha256`.
 - The binary on the VM matches the release binary, and `pw-mcp.sh` on the VM matches the release file.
 - The tailnet handshake (4.3) returned 200, 202, and the 37-tool owner list.
 - A request to loopback without the login header returned 401.
 - `tailscale serve status` shows the 8444 mapping.
-- The Linux profile source confirms the `desktop` and `observe` lists in 5.1.
+- The Linux profile source confirms the `observe` and `owner` lists in 5.1.
