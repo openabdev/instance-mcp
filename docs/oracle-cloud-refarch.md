@@ -233,7 +233,7 @@ hard-code `wayland-1`. If your socket name differs, change it in both units.
 ```sh
 sudo -u oabmcp bash -c '
   export PATH=/opt/node-v26.13.0-linux-arm64/bin:$PATH
-  mkdir -p ~/.local/oab-instance-mcp/pw-mcp && cd ~/.local/oab-instance-mcp/pw-mcp
+  mkdir -p /home/oabmcp/.local/oab-instance-mcp/pw-mcp && cd /home/oabmcp/.local/oab-instance-mcp/pw-mcp
   npm install --save-exact @playwright/mcp@0.0.82
   npx playwright install chromium
 '
@@ -290,9 +290,9 @@ The file is mode 600. Do not print it.
 
 ```sh
 sudo -u oabmcp bash -c '
-  mkdir -p ~/.config/oab-instance-mcp
-  head -c 32 /dev/urandom | base64 | tr -d "=+/\n" | head -c 40 > ~/.config/oab-instance-mcp/token
-  chmod 600 ~/.config/oab-instance-mcp/token
+  mkdir -p /home/oabmcp/.config/oab-instance-mcp
+  head -c 32 /dev/urandom | base64 | tr -d "=+/\n" | head -c 40 > /home/oabmcp/.config/oab-instance-mcp/token
+  chmod 600 /home/oabmcp/.config/oab-instance-mcp/token
 '
 ```
 
@@ -467,6 +467,8 @@ tools. Use a test session, not one doing real work.
 
 Source: `poc/reverse-attach-linux/src/mcp.rs` (`OBSERVE_TOOLS`, `upstream_tool_allowed`). The owner counts were checked live.
 
+The code on `main` still has a `desktop` profile; the two-profile model described here (`observe` and `owner`) is the target, tracked in [openabdev/instance-mcp#59](https://github.com/openabdev/instance-mcp/issues/59).
+
 | Profile | Local tools | Browser tools | Shell-equivalent? |
 |---|---|---|---|
 | `owner` | `sys_info`, `screenshot`, `bash`, `mouse`, `key` | all 32, including `browser_evaluate` and `browser_run_code_unsafe` | **Yes** |
@@ -597,14 +599,24 @@ going through serve. The daemon answers 401 for every denied request, whatever t
 ### 7.5 Upgrade
 
 1. Read the release notes. Check whether a unit file or the Playwright pin changes.
-2. Download and verify the new tarball as in 3.4, with `V` set to the new version. The extracted
-   binary is `/tmp/oab-instance-mcp-$V-linux-arm64/oab-instance-mcp`.
-3. Keep the current binary for rollback. Use absolute paths, because `~` is expanded by the admin
-   shell before `sudo` runs:
+2. Keep the current binary for rollback before you touch the new release. Use absolute paths,
+   because `~` is expanded by the admin shell before `sudo` runs:
 
    ```sh
    sudo -u oabmcp cp /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp \
      /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp.prev
+   ```
+
+3. Download and verify the new tarball. Set `V` to the new version (`0.8.1` below is a
+   placeholder). The extracted binary is `/tmp/oab-instance-mcp-$V-linux-arm64/oab-instance-mcp`:
+
+   ```sh
+   V=0.8.1
+   cd /tmp
+   curl -fsSLO https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-arm64.tar.gz
+   curl -fsSLO https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-arm64.tar.gz.sha256
+   sha256sum -c oab-instance-mcp-$V-linux-arm64.tar.gz.sha256
+   tar -xzf oab-instance-mcp-$V-linux-arm64.tar.gz
    ```
 
 4. Stop the daemon, install the new binary, and start it again. Stopping first avoids replacing a
@@ -709,4 +721,4 @@ sudo tailscale serve --https=8444 off
 - The tailnet handshake (4.3) returned 200, 202, and the 37-tool owner list.
 - A request to loopback without the login header returned 401.
 - `tailscale serve status` shows the 8444 mapping.
-- The Linux profile source confirms the `observe` and `owner` lists in 5.1.
+- The Linux profile source on `main` confirms the `observe` and `owner` lists in 5.1. `main` still defines a `desktop` profile; the two-profile model is tracked in [#59](https://github.com/openabdev/instance-mcp/issues/59).
