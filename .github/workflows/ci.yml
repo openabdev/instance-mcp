@@ -43,11 +43,7 @@ jobs:
       - name: Packaging smoke (unsigned; release signing is tag-only)
         run: scripts/test-packaging.sh .build/debug/oab-instance-mcp
       - name: Test
-        # OsascriptToolTests actually executes /usr/bin/osascript. Basic
-        # scripts don't need TCC grants, but headless-runner behavior is
-        # unverified — skipped for determinism until a green CI run on a
-        # branch proves it safe to re-enable (tracked in #1).
-        run: swift test --skip OsascriptToolTests
+        run: swift test
 
   toolchain-image:
     name: Toolchain image smoke test (${{ matrix.arch }})
