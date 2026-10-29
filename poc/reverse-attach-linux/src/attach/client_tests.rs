@@ -1,13 +1,18 @@
 //! Dial-side negatives for reverse attach, run against a plain TCP listener
 //! standing in for the runtime. They pin what the Rust dialer sends on the
-//! upgrade and how it reads a refused upgrade (the Swift oracle is
+//! upgrade and how it reacts to a refused upgrade (the Swift oracle is
 //! `ReverseAttachNegativeTests`).
+//!
+//! The refused-upgrade cases run the production `dial_loop`, so a regression that
+//! redials after a 401 fails here. The wss case and the missing-header case call
+//! `tungstenite::connect` directly and do not exercise `dial_loop`.
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tungstenite::handshake::server::{
     ErrorResponse, Request as ServerRequest, Response as ServerResponse,
@@ -16,44 +21,29 @@ use tungstenite::http::{Request, Response};
 
 use super::*;
 
-/// What the one-shot runtime saw on the upgrade request.
-#[derive(Clone, Debug, Default)]
-struct Seen {
-    connections: usize,
-    authorization: Option<String>,
-    upgrade: Option<String>,
-    connection: Option<String>,
-}
-
 /// Accept one upgrade on 127.0.0.1:0. A request whose `Authorization` is not
 /// exactly `Bearer <expected>` gets 401. Returns the port and a join handle that
-/// yields what was seen, after a short wait for any second connection.
-fn one_shot_runtime(expected: &'static str) -> (u16, thread::JoinHandle<Seen>) {
+/// yields the Authorization value of each request seen.
+fn one_shot_runtime(expected: &'static str) -> (u16, thread::JoinHandle<Vec<Option<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        let seen = Arc::new(Mutex::new(Seen {
-            connections: 1,
-            ..Seen::default()
-        }));
+        let seen = Arc::new(Mutex::new(None));
         let cb_seen = seen.clone();
         let want = format!("Bearer {expected}");
         #[allow(clippy::result_large_err)] // ErrorResponse is fixed by tungstenite's callback type
         let callback = move |req: &ServerRequest,
                              resp: ServerResponse|
               -> Result<ServerResponse, ErrorResponse> {
-            let header = |name: &str| {
-                req.headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            };
-            let mut s = cb_seen.lock().unwrap();
-            s.authorization = header("authorization");
-            s.upgrade = header("upgrade");
-            s.connection = header("connection");
-            if s.authorization.as_deref() == Some(want.as_str()) {
+            let header = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let ok = header.as_deref() == Some(want.as_str());
+            *cb_seen.lock().unwrap() = Some(header);
+            if ok {
                 Ok(resp)
             } else {
                 Err(Response::builder().status(401).body(None).unwrap())
@@ -63,14 +53,63 @@ fn one_shot_runtime(expected: &'static str) -> (u16, thread::JoinHandle<Seen>) {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let _ = tungstenite::accept_hdr(stream, callback);
+        let authorization = seen.lock().unwrap().clone().flatten();
+        vec![authorization]
+    });
+    (port, handle)
+}
 
-        // A dialer that retried on its own would show up here as a second connection.
-        thread::sleep(Duration::from_millis(300));
-        listener.set_nonblocking(true).unwrap();
-        let extra = listener.accept().is_ok() as usize;
-        let mut out = seen.lock().unwrap().clone();
-        out.connections += extra;
-        out
+/// Accept TCP connections for `linger` and refuse every upgrade whose
+/// `Authorization` is not `Bearer <expected>`. Returns the Authorization value of
+/// each connection, so a redial shows up as a second entry.
+#[allow(clippy::type_complexity)]
+fn refusing_runtime(
+    expected: &'static str,
+    linger: Duration,
+) -> (u16, thread::JoinHandle<Vec<Option<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        let until = Instant::now() + linger;
+        while Instant::now() < until {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let want = format!("Bearer {expected}");
+            let authorization = Arc::new(Mutex::new(None));
+            let cb_seen = authorization.clone();
+            #[allow(clippy::result_large_err)]
+            // ErrorResponse is fixed by tungstenite's callback type
+            let callback = move |req: &ServerRequest,
+                                 resp: ServerResponse|
+                  -> Result<ServerResponse, ErrorResponse> {
+                let header = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let ok = header.as_deref() == Some(want.as_str());
+                *cb_seen.lock().unwrap() = Some(header);
+                if ok {
+                    Ok(resp)
+                } else {
+                    Err(Response::builder().status(401).body(None).unwrap())
+                }
+            };
+            let _ = tungstenite::accept_hdr(stream, callback);
+            seen.push(authorization.lock().unwrap().clone().flatten());
+        }
+        seen
     });
     (port, handle)
 }
@@ -117,6 +156,54 @@ fn upgrade_without_authorization(url: &str) -> Request<()> {
         .unwrap()
 }
 
+/// Run the production `dial_loop` once against a runtime that expects `s3cret`,
+/// with `secret` as the grant's bearer. Returns the grant state and end reason
+/// after the loop returns, and the Authorization value of every connection.
+///
+/// The runtime lingers 2.5 s. The grant deadline is 3 s away. A redial would start
+/// after the 1 s first backoff, so it would land inside the linger window and
+/// show up as a second entry. Without a redial the loop returns at once with a
+/// handshake end reason.
+fn dial_loop_against_refusing_runtime(
+    secret: &str,
+) -> (Option<String>, Option<String>, Vec<Option<String>>) {
+    let (port, server) = refusing_runtime("s3cret", Duration::from_millis(2500));
+    let runtime = format!("ws://127.0.0.1:{port}");
+    let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+    let grant_id = "grant-dial-test".to_string();
+    registry.lock().unwrap().insert(
+        grant_id.clone(),
+        GrantInfo {
+            id: grant_id.clone(),
+            runtime: runtime.clone(),
+            session: "s1".to_string(),
+            profile: "owner".to_string(),
+            principal: "a@b".to_string(),
+            state: "dialing".to_string(),
+            ended: None,
+            expires_at_epoch_secs: now_epoch_secs() + 600,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            secret: secret.to_string(),
+        },
+    );
+    dial_loop(DialGrant {
+        runtime,
+        session: "s1".to_string(),
+        secret: secret.to_string(),
+        profile: "owner".to_string(),
+        deadline_epoch_secs: now_epoch_secs() + 3,
+        registry: registry.clone(),
+        grant_id: grant_id.clone(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    });
+    let (state, ended) = {
+        let map = registry.lock().unwrap();
+        let g = map.get(&grant_id).unwrap();
+        (Some(g.state.clone()), g.ended.clone())
+    };
+    (state, ended, server.join().unwrap())
+}
+
 #[test]
 fn right_bearer_upgrades_with_the_expected_headers() {
     let (port, server) = one_shot_runtime("s3cret");
@@ -127,69 +214,85 @@ fn right_bearer_upgrades_with_the_expected_headers() {
     };
     assert_eq!(resp.status().as_u16(), 101);
     let seen = server.join().unwrap();
-    assert_eq!(seen.authorization.as_deref(), Some("Bearer s3cret"));
+    assert_eq!(seen, vec![Some("Bearer s3cret".to_string())]);
+}
+
+#[test]
+fn right_bearer_upgrade_sends_websocket_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let headers = Arc::new(Mutex::new((None, None)));
+        let cb = headers.clone();
+        #[allow(clippy::result_large_err)] // ErrorResponse is fixed by tungstenite's callback type
+        let callback = move |req: &ServerRequest,
+                             resp: ServerResponse|
+              -> Result<ServerResponse, ErrorResponse> {
+            let get = |name: &str| {
+                req.headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            *cb.lock().unwrap() = (get("upgrade"), get("connection"));
+            Ok(resp)
+        };
+        let _ = tungstenite::accept_hdr(stream, callback);
+        let h = headers.lock().unwrap().clone();
+        h
+    });
+    let req = build_ws_request(&upgrade_url(port), "s3cret").unwrap();
+    tungstenite::connect(req).expect("upgrade should succeed");
+    let (upgrade, connection) = server.join().unwrap();
     assert_eq!(
-        seen.upgrade
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
+        upgrade.as_deref().map(str::to_ascii_lowercase).as_deref(),
         Some("websocket")
     );
-    assert!(seen
-        .connection
+    assert!(connection
         .as_deref()
         .unwrap_or("")
         .to_ascii_lowercase()
         .contains("upgrade"));
-    assert_eq!(seen.connections, 1);
 }
 
 #[test]
 fn same_length_wrong_bearer_is_refused_once_and_stops() {
-    let (port, server) = one_shot_runtime("s3cret");
-    let req = build_ws_request(&upgrade_url(port), "s3crXt").unwrap();
-    let err = match tungstenite::connect(req) {
-        Err(e) => e,
-        Ok(_) => panic!("a wrong bearer must not upgrade"),
-    };
-    assert_eq!(handshake_status(&err), Some(401));
+    let (state, ended, seen) = dial_loop_against_refusing_runtime("s3crXt");
+    assert_eq!(state.as_deref(), Some("ended"));
+    assert_eq!(ended.as_deref(), Some("handshake_rejected_401"));
+    assert_eq!(seen, vec![Some("Bearer s3crXt".to_string())]);
     assert!(matches!(
         disposition_handshake(401),
         Disposition::Stop(ref r) if r == "handshake_rejected_401"
     ));
-    assert_eq!(server.join().unwrap().connections, 1);
 }
 
 #[test]
 fn empty_bearer_is_refused_once_and_stops() {
-    let (port, server) = one_shot_runtime("s3cret");
-    let req = build_ws_request(&upgrade_url(port), "").unwrap();
-    let err = match tungstenite::connect(req) {
-        Err(e) => e,
-        Ok(_) => panic!("an empty bearer must not upgrade"),
-    };
-    assert_eq!(handshake_status(&err), Some(401));
-    assert_eq!(server.join().unwrap().connections, 1);
+    let (state, ended, seen) = dial_loop_against_refusing_runtime("");
+    assert_eq!(state.as_deref(), Some("ended"));
+    assert_eq!(ended.as_deref(), Some("handshake_rejected_401"));
+    assert_eq!(seen.len(), 1, "a redial happened: {seen:?}");
 }
 
+/// Runtime-side refusal only: `build_ws_request` always sends Authorization, so
+/// the dialer never produces this request. The test checks that a runtime which
+/// gets an upgrade with no Authorization refuses it, and that one connection was
+/// made.
 #[test]
-fn missing_authorization_header_is_refused_once_and_stops() {
-    let (port, server) = one_shot_runtime("s3cret");
+fn upgrade_without_authorization_is_refused_with_one_connection() {
+    let (port, server) = refusing_runtime("s3cret", Duration::from_millis(300));
     let req = upgrade_without_authorization(&upgrade_url(port));
     let err = match tungstenite::connect(req) {
         Err(e) => e,
         Ok(_) => panic!("an upgrade without Authorization must not succeed"),
     };
     assert_eq!(handshake_status(&err), Some(401));
-    assert!(matches!(
-        disposition_handshake(401),
-        Disposition::Stop(ref r) if r == "handshake_rejected_401"
-    ));
-    let seen = server.join().unwrap();
-    assert_eq!(seen.authorization, None);
-    assert_eq!(seen.connections, 1);
+    assert_eq!(server.join().unwrap(), vec![None]);
 }
 
+/// Calls `tungstenite::connect` directly, not `dial_loop`.
 #[test]
 fn wss_to_a_plaintext_listener_fails_without_falling_back() {
     let (port, server) = plaintext_listener();

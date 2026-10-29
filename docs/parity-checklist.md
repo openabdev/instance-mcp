@@ -50,7 +50,7 @@ The fixtures stop at the JSON-RPC layer. These HTTP behaviours are open.
 | `DELETE /mcp` | ends the session, 204 | bare 204, no session | open |
 | non-JSON Content-Type on POST | 415 | no check | open |
 | malformed JSON body on POST | 400 with JSON-RPC error -32700 | 202, no body | open (follows from the wire drift above) |
-| `GET /mcp` | 405 | 405 | pass (not tested) |
+| `GET /mcp` | 405 | 405 | open (not tested) |
 
 ## 4. Reverse attach
 
@@ -59,13 +59,13 @@ The fixtures stop at the JSON-RPC layer. These HTTP behaviours are open.
 | close-code and handshake disposition | `ConformanceVectorTests` | `attach::conformance` | pass |
 | attach URL | vectors | vectors | pass |
 | dial with bearer, expected upgrade headers | `ReverseAttachTests` (WS to fake runtime) | `attach::client::tests` | pass (ws:// only) |
-| refused upgrade (401) stops after one dial | `ReverseAttachRefusedUpgradeTests` | `attach::client::tests` | pass |
+| refused upgrade (401) stops after one dial | `ReverseAttachRefusedUpgradeTests` | `attach::client::tests`, `dial_loop` runs against the refusing runtime | pass |
 | constant-time bearer compare (same length, case, trailing space) | `auth_vectors.json` | `auth::conformance` | pass |
 | sha256 verifier (runtime stores the hash only) | not in this repo | not in this repo | open (runtime side, openab-pty) |
 | credential never in shell output (grant body) | `AttachCredentialSecrecyTests` | `attach::grant_secrecy_tests` | pass (GET bodies, POST response) |
 | pod stores only the verifier | not in this repo | not in this repo | open (runtime side) |
 | successful wss:// handshake | not tested | not tested | open (needs a TLS fixture) |
-| wss:// never falls back to plaintext | covered by switchboard tests | `attach::client::tests` | pass (Rust) |
+| wss:// never falls back to plaintext | not tested (`SwitchboardTests` checks URL validation only) | `attach::client::tests` (tungstenite connect, not `dial_loop`) | pass (Rust) |
 | TLS certificate verification | not tested | not tested | open (needs a cert fixture) |
 | origin policy on the upgrade | undefined | undefined | open (decision needed) |
 
