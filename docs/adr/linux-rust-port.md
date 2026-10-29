@@ -77,6 +77,7 @@ pod over **WSS**, the pod stores only a **sha256 verifier**, the **shell never h
 credential**, and **tool profiles are scoped per connection**. Re-implementing this in Rust
 risks subtle divergence (constant-time verifier compare, TLS peer/cert handling, WS
 upgrade/origin checks, per-dispatch profile enforcement). Therefore:
+
 - A **versioned MCP + reverse-attach conformance / differential test suite** is the shared
   anti-drift contract. Both the Swift and Rust implementations must pass it; it is the real
   mechanism that prevents protocol drift during the Swift↔Rust transition.
@@ -92,6 +93,7 @@ node → graphical tools disabled, exec/sysinfo/MCP still available).
 ### Validation gate (must pass before Status → Accepted)
 
 The PoC must exercise the **highest-risk** components, not just the easy ones:
+
 - (a) Rust MCP-over-HTTP handles `initialize` + tool dispatch.
 - (b) `sys_info` reads `/proc` + `wlr-randr`; `screenshot` shells out to `grim`; input via `wlrctl` (pointer+keyboard). [#23: input functionally verified on x86_64 headless sway (move/click/type, not pixel-accuracy); `wlrctl` package present on aarch64 but input not re-tested there.]
 - (c) **auth + reverse-attach**: WSS dial-out, sha256 verifier with constant-time compare,

@@ -82,12 +82,14 @@ profile.
 ## Changes
 
 ### oab-instance-mcp
+
 - `scripts/deploy.sh`: generate/reuse `~/.config/oab-instance-mcp/token`, add `--token-file`.
 - `StatusItemController`: read the token file; add a masked display line + "Copy Token" action.
 - `AuthPolicy`: no code change (AND semantics already present); covered by existing tests.
 - `README.md`: document that the deployed agent now requires a bearer token.
 
 ### OpenAB Connect (client side)
+
 - `ScreenProfile`: add non-persisted `token` + a Keychain helper (`ScreenTokenStore`) keyed by
   profile name; `ScreenStore.save/remove` write/delete the Keychain item.
 - `SidebarScreens.presentScreenSheet`: add a "Token" field (optional; blank = no token, for
