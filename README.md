@@ -1,4 +1,10 @@
-# oab-instance-mcp
+# OpenAB Computer (`oab-instance-mcp`)
+
+> **Renaming in progress.** This product is moving from `instance-mcp` to **OpenAB Computer**
+> (repository `openabdev/openab-computer`, tracked in
+> [#63](https://github.com/openabdev/instance-mcp/issues/63)). Until that rename ships, the
+> executable, install paths, LaunchAgent label and bundle id keep their `oab-instance-mcp` /
+> `dev.openab.instance-mcp` names. Commands in this README use those names.
 
 The "hands and feet" half of [openabdev/openab#1544](https://github.com/openabdev/openab/issues/1544):
 a thin daemon that lives in a Mac's logged-in desktop session and exposes the machine to a
@@ -192,7 +198,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 - Either `secret` (already minted by the operator at the runtime) or `admin_credential` (the Mac
   mints, TTL is the runtime's) — exactly one. A new grant for the same runtime+session replaces the
   old one; that is renewal. `ttl_secs` is forwarded all the way to the runtime (not just held by
-  the Mac): Connect/Remote offer exactly 1/2/4/12/24 hours; instance-mcp accepts up to 24h, and a
+  the Mac): Connect/Remote offer exactly 1/2/4/12/24 hours; OpenAB Computer accepts up to 24h, and a
   runtime with a lower operator ceiling rejects the request rather than silently shortening it.
 - **Redial policy** (openab-pty §9.2): stop on `4001` expired · `4002` replaced · `4004` session
   ended · `4010` revoked · handshake `401`; redial with backoff (1 s → 30 s) on `1000` / `4006` /
