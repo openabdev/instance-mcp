@@ -86,7 +86,8 @@ Use an Ubuntu 24.04 image. The v0.8.0 arm64 binary needs glibc 2.39, which Ubunt
 2. Join the tailnet with a hostname you will recognize. The reference node is `oracle-vm`.
 3. In the admin console, enable **MagicDNS** and **HTTPS Certificates**. Without HTTPS
    certificates, `tailscale serve --https` fails.
-4. Tag the node in the admin console. See section 5.
+4. Tagging the node in the admin console is recommended before you rely on `owner` over the
+   tailnet. The reference node has no tag yet. See section 5.4, item 3.
 
 ### 2.3 Accounts
 
@@ -178,7 +179,7 @@ The seat is a headless sway with one virtual 1920×1080 output and no input devi
 and the daemon's virtual pointer use its Wayland socket.
 
 Write the files in 3.5 and 3.8 as `oabmcp`, so they keep that owner. For example:
-`sudo -u oabmcp mkdir -p /home/oabmcp/.config/sway`, then
+`sudo -u oabmcp mkdir -p /home/oabmcp/.config/sway /home/oabmcp/.config/systemd/user`, then
 `sudo -u oabmcp tee /home/oabmcp/.config/sway/config >/dev/null`, with the config as its input.
 
 `~oabmcp/.config/sway/config`:
@@ -301,6 +302,10 @@ sudo -u oabmcp bash -c '
 Two units, under `~oabmcp/.config/systemd/user/`, written as `oabmcp` as in 3.5. Replace
 `<token-file>` and `<tailnet-login>` with real values before you save. `<token-file>` becomes
 `/home/oabmcp/.config/oab-instance-mcp/token`.
+
+```sh
+sudo -u oabmcp mkdir -p /home/oabmcp/.config/systemd/user
+```
 
 `oab-pw-mcp.service`:
 
@@ -599,12 +604,16 @@ going through serve. The daemon answers 401 for every denied request, whatever t
 ### 7.5 Upgrade
 
 1. Read the release notes. Check whether a unit file or the Playwright pin changes.
-2. Keep the current binary for rollback before you touch the new release. Use absolute paths,
-   because `~` is expanded by the admin shell before `sudo` runs:
+2. Keep the current binary for rollback before you touch the new release. Keep one older copy
+   too: `.prev2` receives the old `.prev`, then `.prev` receives the current binary. Use absolute
+   paths, because `~` is expanded by the admin shell before `sudo` runs:
 
    ```sh
-   sudo -u oabmcp cp /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp \
-     /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp.prev
+   D=/home/oabmcp/.local/oab-instance-mcp
+   if sudo -u oabmcp test -e $D/oab-instance-mcp.prev; then
+     sudo -u oabmcp cp $D/oab-instance-mcp.prev $D/oab-instance-mcp.prev2
+   fi
+   sudo -u oabmcp cp $D/oab-instance-mcp $D/oab-instance-mcp.prev
    ```
 
 3. Download and verify the new tarball. Set `V` to the new version (`0.8.1` below is a
@@ -638,6 +647,9 @@ going through serve. The daemon answers 401 for every denied request, whatever t
      /home/oabmcp/.local/oab-instance-mcp/oab-instance-mcp
    ouser systemctl --user start oab-instance-mcp
    ```
+
+`.prev2` holds the binary from one upgrade earlier. To roll back to it, use the step 6 commands
+with `.prev2` in place of `.prev`.
 
 Before you rely on a rollback copy, compare its SHA-256 with the release it should match (3.4).
 
