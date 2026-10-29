@@ -567,15 +567,19 @@ through serve.
 1. Read the release notes. Check whether a unit file or the Playwright pin changes.
 2. Download and verify the new tarball (3.4).
 3. Keep the current binary for rollback, as the service user:
+
    ```sh
    sudo -u oabmcp cp ~/.local/oab-instance-mcp/oab-instance-mcp \
      ~/.local/oab-instance-mcp/oab-instance-mcp.prev
    ```
+
 4. Install the new binary and restart:
+
    ```sh
    sudo -u oabmcp install -m 755 <new-binary> ~/.local/oab-instance-mcp/oab-instance-mcp
    ouser systemctl --user restart oab-instance-mcp
    ```
+
 5. Run the handshake (4.3) and confirm the tool count.
 6. To roll back, copy `oab-instance-mcp.prev` over the binary and restart.
 
