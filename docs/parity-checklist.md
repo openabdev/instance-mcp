@@ -58,7 +58,7 @@ The fixtures stop at the JSON-RPC layer. These HTTP behaviours are open.
 |-----|-------|------|--------|
 | close-code and handshake disposition | `ConformanceVectorTests` | `attach::conformance` | pass |
 | attach URL | vectors | vectors | pass |
-| dial with bearer, expected upgrade headers | `ReverseAttachTests` (WS to fake runtime) | `attach::client::tests` | pass (ws:// only) |
+| dial with bearer, expected upgrade headers | not asserted (FakeRuntime accepts any bearer); bearer seen only on the 401 path, see `ReverseAttachRefusedUpgradeTests` | `attach::client::tests` | pass (Rust); Swift open |
 | refused upgrade (401) stops after one dial | `ReverseAttachRefusedUpgradeTests` | `attach::client::tests`, `dial_loop` runs against the refusing runtime | pass |
 | constant-time bearer compare (same length, case, trailing space) | `auth_vectors.json` | `auth::conformance` | pass |
 | sha256 verifier (runtime stores the hash only) | not in this repo | not in this repo | open (runtime side, openab-pty) |
