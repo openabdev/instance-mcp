@@ -2,9 +2,9 @@
 
 > **Renaming in progress.** This product is moving from `instance-mcp` to **OpenAB Computer**
 > (repository `openabdev/openab-computer`, tracked in
-> [#63](https://github.com/openabdev/instance-mcp/issues/63)). Until that rename ships, the
-> executable, install paths, LaunchAgent label and bundle id keep their `oab-instance-mcp` /
-> `dev.openab.instance-mcp` names. Commands in this README use those names.
+> [#63](https://github.com/openabdev/openab-computer/issues/63)). The executable, bundle id and
+> paths keep their current names (`oab-instance-mcp` / `dev.openab.instance-mcp`) and will not
+> change in this rename. Commands in this README use those names.
 
 The "hands and feet" half of [openabdev/openab#1544](https://github.com/openabdev/openab/issues/1544):
 a thin daemon that lives in a Mac's logged-in desktop session and exposes the machine to a
@@ -74,7 +74,7 @@ Design notes: [`docs/requirements/connect-closed-loop.md`](docs/requirements/con
 ## Quick start
 
 **macOS** — download `oab-instance-mcp-VERSION-universal.pkg` from
-[Releases](https://github.com/openabdev/instance-mcp/releases), double-click, and follow the
+[Releases](https://github.com/openabdev/openab-computer/releases), double-click, and follow the
 permissions wizard ([details](#download-and-install)). Then point a caller at it:
 
 ```sh
@@ -87,9 +87,9 @@ kiro-cli mcp add --name macmini-mcp --url https://<host>.<tailnet>.ts.net:8444/m
 ([full guide](docs/linux-setup.md)):
 
 ```sh
-V=$(curl -fsSL https://api.github.com/repos/openabdev/instance-mcp/releases/latest | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"][1:])')
+V=$(curl -fsSL https://api.github.com/repos/openabdev/openab-computer/releases/latest | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"][1:])')
 A=$(dpkg --print-architecture)   # arm64 | amd64
-curl -fsSLO "https://github.com/openabdev/instance-mcp/releases/download/v$V/oab-instance-mcp-$V-linux-$A.tar.gz"
+curl -fsSLO "https://github.com/openabdev/openab-computer/releases/download/v$V/oab-instance-mcp-$V-linux-$A.tar.gz"
 tar xzf oab-instance-mcp-$V-linux-$A.tar.gz && cd oab-instance-mcp-$V-linux-$A
 ./install-linux.sh                # a box with no desktop: add --headless-seat
 ```
@@ -184,7 +184,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
   the removed name `sandbox`. Hidden tools are absent from `tools/list`, and a forced
   `tools/call` is an *unknown tool* error. Widening is a new grant. Full per-profile tool lists
   and diffs: [`docs/tool-profiles.md`](docs/tool-profiles.md).
-- ⚠️ **Neither profile is a security boundary** ([#45](https://github.com/openabdev/instance-mcp/issues/45)).
+- ⚠️ **Neither profile is a security boundary** ([#45](https://github.com/openabdev/openab-computer/issues/45)).
   GUI control is a shell: `osascript` runs `do shell script`, `key` types into a terminal, `mouse`
   opens one. Removing `exec*` removes a convenient entry point, **not a privilege** — lending a
   computer under `desktop` hands the agent the desktop user's shell for the whole lease, and the
@@ -268,7 +268,7 @@ Verified 2026-09-26 end to end on macmini against the openab-pty runtime (PR #38
 Tagged releases publish a universal, Developer-ID-signed and Apple-notarized installer:
 
 1. Download `oab-instance-mcp-VERSION-universal.pkg` from
-   [GitHub Releases](https://github.com/openabdev/instance-mcp/releases).
+   [GitHub Releases](https://github.com/openabdev/openab-computer/releases).
 2. Sign into Tailscale and keep a desktop user logged in.
 3. Double-click the package. It auto-detects your Tailscale login/name, preserves or creates the
    bearer token, installs the LaunchAgent, detects the Playwright upstream, and configures
