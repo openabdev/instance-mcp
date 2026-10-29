@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 pub mod client;
+#[cfg(test)]
+mod grant_secrecy_tests;
 pub mod store;
 
 // Shared grant registry

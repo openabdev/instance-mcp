@@ -12,6 +12,8 @@ mod http;
 mod mcp;
 mod platform;
 mod tools;
+#[cfg(test)]
+mod wire_conformance;
 
 fn main() {
     // Input devices first, so clients see pointer/keyboard capabilities before any tool

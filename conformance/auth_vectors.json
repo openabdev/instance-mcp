@@ -17,6 +17,9 @@
     {"name": "allowlist + no identity + loopback + insecure-local -> allow local", "config": {"allowedLogins": ["you@example.com"], "allowLocalUnauthenticated": true}, "headers": {}, "remoteIsLoopback": true, "expect": {"allow": "local"}},
     {"name": "insecure-local but has x-forwarded-for -> deny (not truly local)", "config": {"allowedLogins": ["you@example.com"], "allowLocalUnauthenticated": true}, "headers": {"x-forwarded-for": "1.2.3.4"}, "remoteIsLoopback": true, "expect": {"deny": "no Tailscale identity on request"}},
     {"name": "insecure-local only, loopback, no headers -> allow local", "config": {"allowLocalUnauthenticated": true}, "headers": {}, "remoteIsLoopback": true, "expect": {"allow": "local"}},
-    {"name": "insecure-local only but not loopback -> deny", "config": {"allowLocalUnauthenticated": true}, "headers": {}, "remoteIsLoopback": false, "expect": {"deny": "unauthenticated"}}
+    {"name": "insecure-local only but not loopback -> deny", "config": {"allowLocalUnauthenticated": true}, "headers": {}, "remoteIsLoopback": false, "expect": {"deny": "unauthenticated"}},
+    {"name": "token same length, one byte differs -> deny bad token", "config": {"bearerToken": "s3cret"}, "headers": {"authorization": "Bearer s3crXt"}, "remoteIsLoopback": true, "expect": {"deny": "bad token"}},
+    {"name": "token case changed -> deny bad token (byte compare, not case-folded)", "config": {"bearerToken": "s3cret"}, "headers": {"authorization": "Bearer S3CRET"}, "remoteIsLoopback": true, "expect": {"deny": "bad token"}},
+    {"name": "token with trailing space -> deny bad token (no trimming)", "config": {"bearerToken": "s3cret"}, "headers": {"authorization": "Bearer s3cret "}, "remoteIsLoopback": true, "expect": {"deny": "bad token"}}
   ]
 }
