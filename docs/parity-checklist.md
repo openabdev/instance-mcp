@@ -60,12 +60,12 @@ The fixtures stop at the JSON-RPC layer. These HTTP behaviours are open.
 | attach URL | vectors | vectors | pass |
 | dial with bearer, expected upgrade headers | not asserted (FakeRuntime accepts any bearer); bearer seen only on the 401 path, see `ReverseAttachRefusedUpgradeTests` | `attach::client::tests` | pass (Rust); Swift open |
 | refused upgrade (401) stops after one dial | `ReverseAttachRefusedUpgradeTests` | `attach::client::tests`, `dial_loop` runs against the refusing runtime | pass |
-| constant-time bearer compare (same length, case, trailing space) | `auth_vectors.json` | `auth::conformance` | pass |
+| bearer compare is byte-exact (same length, case, trailing space); vectors check outcomes, not timing | `auth_vectors.json` | `auth::conformance` | pass |
 | sha256 verifier (runtime stores the hash only) | not in this repo | not in this repo | open (runtime side, openab-pty) |
 | credential never in shell output (grant body) | `AttachCredentialSecrecyTests` | `attach::grant_secrecy_tests` | pass (GET bodies, POST response) |
 | pod stores only the verifier | not in this repo | not in this repo | open (runtime side) |
 | successful wss:// handshake | not tested | not tested | open (needs a TLS fixture) |
-| wss:// never falls back to plaintext | not tested (`SwitchboardTests` checks URL validation only) | `attach::client::tests` (tungstenite connect, not `dial_loop`) | pass (Rust) |
+| wss:// never falls back to plaintext | not tested (`SwitchboardTests` checks URL validation only) | `attach::client::tests` (tungstenite connect, not `dial_loop`) | pass (Rust), with a caveat: on Linux the dial panics (no process-level rustls CryptoProvider) and the test accepts the panic, so it shows only that no plaintext HTTP is sent. Follow-up #66 |
 | TLS certificate verification | not tested | not tested | open (needs a cert fixture) |
 | origin policy on the upgrade | undefined | undefined | open (decision needed) |
 
@@ -73,8 +73,9 @@ The fixtures stop at the JSON-RPC layer. These HTTP behaviours are open.
 
 Cells come from the source files on each side. The Swift names are from
 `Sources/InstanceMCPCore/Tools/` and `UpstreamMCP.swift`. The Rust names are
-from `poc/reverse-attach-linux/src/mcp.rs` (`LOCAL_TOOL_NAMES`) and
-`src/tools/`. The classification column is owned by #59 (see section 6), so it is
+from `poc/reverse-attach-linux/src/mcp.rs` (`LOCAL_TOOL_NAMES`, and the
+`Upstream` re-serving code with `DESKTOP_BROWSER_TOOLS` and
+`upstream_tool_allowed`) and `src/tools/`. The classification column is owned by #59 (see section 6), so it is
 not filled here.
 
 | Tool | Swift present | Rust present | Classification | Conformance test |
@@ -86,7 +87,7 @@ not filled here.
 | `key` | `KeyTool` | yes (`tools/input.rs`) | see #59 | none |
 | `osascript` | `OsascriptTool` | no (macOS only) | see #59 | none |
 | `exec_start`, `exec_poll`, `exec_list`, `exec_cancel` | `AsyncExecTools` | no | see #59 | none |
-| `browser_*` (upstream Playwright) | `UpstreamMCP` | no | see #59 | none |
+| `browser_*` (upstream Playwright) | `UpstreamMCP` | yes (`mcp.rs` `Upstream`, `MCP_UPSTREAM`); desktop allowlist `DESKTOP_BROWSER_TOOLS` matches Swift `ToolProfile.desktopBrowserTools` | see #59 | none |
 
 ## 6. Profile rows
 

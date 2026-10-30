@@ -160,9 +160,10 @@ fn upgrade_without_authorization(url: &str) -> Request<()> {
 /// with `secret` as the grant's bearer. Returns the grant state and end reason
 /// after the loop returns, and the Authorization value of every connection.
 ///
-/// The runtime lingers 2.5 s. The grant deadline is 3 s away. A redial would start
-/// after the 1 s first backoff, so it would land inside the linger window and
-/// show up as a second entry. Without a redial the loop returns at once with a
+/// The runtime lingers 2.5 s. The grant deadline is 4 whole seconds away (more
+/// than 3 s), so it outlasts the linger window. A redial would start after the
+/// 1 s first backoff, so it would land inside the linger window and show up as a
+/// second entry. Without a redial the loop returns at once with a
 /// handshake end reason.
 fn dial_loop_against_refusing_runtime(
     secret: &str,
@@ -191,7 +192,7 @@ fn dial_loop_against_refusing_runtime(
         session: "s1".to_string(),
         secret: secret.to_string(),
         profile: "owner".to_string(),
-        deadline_epoch_secs: now_epoch_secs() + 3,
+        deadline_epoch_secs: now_epoch_secs() + 4,
         registry: registry.clone(),
         grant_id: grant_id.clone(),
         cancelled: Arc::new(AtomicBool::new(false)),
@@ -205,7 +206,7 @@ fn dial_loop_against_refusing_runtime(
 }
 
 #[test]
-fn right_bearer_upgrades_with_the_expected_headers() {
+fn right_bearer_is_sent_and_upgrades() {
     let (port, server) = one_shot_runtime("s3cret");
     let req = build_ws_request(&upgrade_url(port), "s3cret").unwrap();
     let (_socket, resp) = match tungstenite::connect(req) {

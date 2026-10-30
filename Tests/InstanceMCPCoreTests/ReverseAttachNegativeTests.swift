@@ -109,6 +109,9 @@ final class AttachCredentialSecrecyTests: XCTestCase {
 
         let list = await ep.handle(attachReq("GET", "/attach"), remoteIsLoopback: true)
         let one = await ep.handle(attachReq("GET", "/attach/\(id)"), remoteIsLoopback: true)
+        XCTAssertEqual(list.status, 200, "GET /attach: \(list.status)")
+        XCTAssertEqual(one.status, 200, "GET /attach/<id>: \(one.status)")
+        XCTAssertTrue(String(decoding: list.body, as: UTF8.self).contains(id), "grant id missing from GET /attach")
         for r in [post, list, one] {
             XCTAssertFalse(String(decoding: r.body, as: UTF8.self).contains(canary),
                            "secret leaked in \(r.status) body")

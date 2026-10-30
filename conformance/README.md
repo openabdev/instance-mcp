@@ -14,8 +14,9 @@ Both run in CI on every PR (`swift test`, `cargo test`). Change a vector only fo
 behaviour change, and make both implementations pass in the same PR.
 
 Dial-side and credential negatives that need code rather than a vector file live next to the
-code: `ReverseAttachNegativeTests.swift` and `attach/client_tests.rs` (refused 401, wrong or
-missing bearer, no plaintext fallback), `attach/grant_secrecy_tests.rs` and
+code: `ReverseAttachNegativeTests.swift` and `attach/client_tests.rs` (refused 401, wrong,
+same-length or empty bearer, no plaintext fallback; plus a runtime-side check that an upgrade
+with no Authorization is refused, which the dialer never sends), `attach/grant_secrecy_tests.rs` and
 `AttachCredentialSecrecyTests` (the attach secret never appears in a grant body).
 
 Open items, the parity gate, and the known drift list are in
