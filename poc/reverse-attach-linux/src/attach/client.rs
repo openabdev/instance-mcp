@@ -330,4 +330,8 @@ fn handshake_status(err: &tungstenite::Error) -> Option<u16> {
     }
 }
 
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;
+
 // ---------------------------------------------------------------------------
