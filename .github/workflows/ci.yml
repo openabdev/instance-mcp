@@ -1,8 +1,3 @@
-# STAGED WORKFLOW — move to .github/workflows/ci.yml
-# (the GitHub App lacked the `workflows` permission to place it there directly)
-#
-#   git mv ci-staging/ci.yml .github/workflows/ci.yml && rmdir ci-staging
-
 name: CI
 
 on:

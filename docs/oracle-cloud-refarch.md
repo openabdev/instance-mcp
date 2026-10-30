@@ -86,7 +86,7 @@ Use an Ubuntu 24.04 image. The v0.8.0 arm64 binary needs glibc 2.39, which Ubunt
 2. Join the tailnet with a hostname you will recognize. The reference node is `oracle-vm`.
 3. In the admin console, enable **MagicDNS** and **HTTPS Certificates**. Without HTTPS
    certificates, `tailscale serve --https` fails.
-4. Tagging the node in the admin console is recommended before you rely on `owner` over the
+4. Prerequisite, not done: tag the node in the admin console before you rely on `owner` over the
    tailnet. The reference node has no tag yet. See section 5.4, item 3.
 
 ### 2.3 Accounts
@@ -291,8 +291,9 @@ The file is mode 600. Do not print it.
 
 ```sh
 sudo -u oabmcp bash -c '
+  umask 077
   mkdir -p /home/oabmcp/.config/oab-instance-mcp
-  head -c 32 /dev/urandom | base64 | tr -d "=+/\n" | head -c 40 > /home/oabmcp/.config/oab-instance-mcp/token
+  head -c 32 /dev/urandom | base64 | tr -d "=+/\n" > /home/oabmcp/.config/oab-instance-mcp/token
   chmod 600 /home/oabmcp/.config/oab-instance-mcp/token
 '
 ```
